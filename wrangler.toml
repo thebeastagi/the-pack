@@ -24,6 +24,7 @@ PRIVATE_BETA = "1"
 HOSTNAME = "pack.thebeastagi.com"
 REALTIME_SFU_APP_ID = "d781a853273752ae764ef806fbb4ee2c"  # fleet raw-SFU app (non-secret id)
 XAI_MODEL = "grok-voice-think-fast-1.0"
+XAI_CHAT_MODEL = "grok-4.20-0309-non-reasoning"   # Grok brain seam (agent citizens); key = XAI_API_KEY secret
 # Phase 2.7 — Agentverse Memory + provenance + hosted agents (non-secret config;
 # AM_API_KEY + PACK_SIGNING_KEY_JWK stay `wrangler secret put` only).
 AM_BASE_URL = "https://am-server-jbneh74b5q-uc.a.run.app"

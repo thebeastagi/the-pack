@@ -37,7 +37,7 @@ test("health", async () => {
     ok: true,
     service: "the-pack",
     version: "test",
-    features: { agentverse_memory: false, provenance_signing: false, hosted_agents: [] },
+    features: { agentverse_memory: false, provenance_signing: false, grok_brain: false, self_serve_agents: true, hosted_agents: [] },
   });
 });
 

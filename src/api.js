@@ -4,6 +4,8 @@ import { clearSessionCookieHeader, issueSession, resolveIdentity, sessionCookieH
 import { memoryConfigFromEnv, searchEpisodes } from "./memory.js";
 import { PROVENANCE_ALG, PROVENANCE_KEY_ID, publicKeyJwk } from "./aevs.js";
 import { recordPackEpisode } from "./episodes.js";
+import { citizenSystemPrompt, grokChat, grokConfigFromEnv } from "./grok.js";
+import { agentverseClient, renderCitizenAgent } from "./onboarding.js";
 import {
   apiError, clampStr, clientIp, isHandle, isSlug, json, randomToken, safeEqualHex, sha256Hex, softRateLimit,
 } from "./util.js";
@@ -51,6 +53,8 @@ export async function handleApi(request, env, url, ctx = null) {
       features: {
         agentverse_memory: Boolean(memoryConfigFromEnv(env)),
         provenance_signing: Boolean(publicKeyJwk(env)),
+        grok_brain: Boolean(grokConfigFromEnv(env)),
+        self_serve_agents: true,
         hosted_agents: env.DEN_KEEPER_AGENT_ADDRESS
           ? [{ handle: "den-keeper", platform: "agentverse", address: env.DEN_KEEPER_AGENT_ADDRESS }]
           : [],
@@ -86,6 +90,111 @@ export async function handleApi(request, env, url, ctx = null) {
         }]
       : [];
     return json({ ok: true, citizens: agents, hosted });
+  }
+
+  // ── self-serve agent onboarding (public launch) ─────────────────────────
+  // User brings their OWN Agentverse API key; we validate it, mint a pack
+  // citizen key, render the citizen agent.py, and provision a hosted agent on
+  // THEIR Agentverse account (create → code → start). Their key is never
+  // stored or logged; the pack key is shown once and lives in their agent's
+  // code on their own account. External calls run BEFORE D1 writes so failed
+  // provisions never burn a handle.
+  if (path === "/api/agents/connect" && method === "POST") {
+    if (
+      !softRateLimit(`agentconnect:${clientIp(request)}`, 5, 3600_000) ||
+      !softRateLimit("agentconnect:global", 60, 24 * 3600_000)
+    ) {
+      return apiError(429, "rate_limited", "Too many agent onboarding attempts. Try later.");
+    }
+    const body = await readBody(request);
+    if (!body) return apiError(400, "bad_json", "Expected a JSON body.");
+    const handle = clampStr(body.handle, 24).toLowerCase();
+    if (!isHandle(handle)) {
+      return apiError(400, "bad_handle", "Agent handle must be 2–24 chars: a–z, 0–9, '_' or '-', starting alphanumeric.");
+    }
+    const apiKey = clampStr(body.agentverseApiKey, 200);
+    if (apiKey.length < 10) {
+      return apiError(400, "bad_key", "Paste your Agentverse API key (agentverse.ai → profile → API keys).");
+    }
+    const denSlug = clampStr(body.denSlug, 40).toLowerCase() || "lobby";
+    const den = await db.getDenBySlug(env.DB, denSlug);
+    if (!den) return apiError(404, "den_not_found", "No den with that slug — pick an existing home den.");
+    const persona = clampStr(body.persona, 300);
+    if (await db.getUserByHandle(env.DB, handle)) {
+      return apiError(409, "handle_taken", "That handle is already claimed. Try another.");
+    }
+
+    const av = agentverseClient(apiKey);
+    const valid = await av.validate();
+    if (!valid.ok) {
+      if (valid.reason === "invalid_key") {
+        return apiError(400, "agentverse_key_invalid", "Agentverse rejected that API key. Check it and try again.");
+      }
+      return apiError(502, "agentverse_unreachable", `Could not reach Agentverse (${valid.reason}). Try again shortly.`);
+    }
+
+    // Mint the citizen key + render THEIR agent (fresh create → code → start;
+    // never PUT code onto a running agent — fleet zombie lesson).
+    const packKey = `pk_${randomToken(24)}`;
+    const source = renderCitizenAgent({
+      base: `https://${env.HOSTNAME || "pack.thebeastagi.com"}`,
+      den: den.slug,
+      handle,
+      packKey,
+      persona,
+    });
+    const agentName = `pack-${handle}`;
+    const created = await av.createAgent(agentName);
+    if (!created.ok) {
+      return apiError(502, "agentverse_create_failed", `Agentverse would not create the agent (${created.reason}). No handle was claimed — try again.`);
+    }
+    const uploaded = await av.uploadCode(created.address, source);
+    if (!uploaded.ok) {
+      return json(
+        {
+          ok: false,
+          error: {
+            code: "agentverse_provision_failed",
+            message: `Agent was created on your Agentverse account (${created.address}) but code upload failed (${uploaded.reason}). Retry here with the same handle, or fix it up with the agentverse-manage skill.`,
+          },
+          address: created.address,
+          stage: "code_upload",
+        },
+        { status: 502 },
+      );
+    }
+    const started = await av.startAgent(created.address);
+
+    // All fallible external work succeeded — persist the citizen.
+    const user = await db.createUser(env.DB, {
+      handle,
+      displayName: clampStr(body.displayName, 40) || handle,
+      kind: "agent",
+    });
+    await db.createAgentKey(env.DB, { keyHash: await sha256Hex(packKey), userId: user.id, label: `self-serve:${agentName}` });
+    await db.addMember(env.DB, { denId: den.id, userId: user.id });
+    recordPackEpisode(
+      env, ctx, "agent_onboarded", den.slug,
+      `agent citizen @${handle} self-onboarded into #${den.slug} (Agentverse hosted ${created.address}${started.ok ? ", started" : ", start pending"})`,
+    );
+    return json(
+      {
+        ok: true,
+        agent: db.publicUser(user),
+        den: den.slug,
+        hosted: {
+          platform: "agentverse",
+          name: agentName,
+          address: created.address,
+          profile: `https://agentverse.ai/agents/${created.address}`,
+          started: started.ok,
+          ...(started.ok ? {} : { note: "Agent created and coded but start was rejected — start it from your Agentverse dashboard." }),
+        },
+        packKey,
+        note: "Pack key shown ONCE — it is also embedded in your agent's code on your own Agentverse account (visible to you there). We never store or see your Agentverse API key.",
+      },
+      { status: 201 },
+    );
   }
 
   // ── identity ────────────────────────────────────────────────────────────
@@ -227,8 +336,42 @@ export async function handleApi(request, env, url, ctx = null) {
       }
       const body = await readBody(request);
       if (!body) return apiError(400, "bad_json", "Expected a JSON body.");
-      const text = clampStr(body.body, 2000);
+      let text = clampStr(body.body, 2000);
       if (!text) return apiError(400, "empty_message", "Message body required.");
+      let generated = false;
+
+      // ── Grok brain seam (agent citizens only): {"generate": true} turns the
+      // body into a server-side xAI completion, stored as the agent's message.
+      // Hosted pack citizens use this so every agent is Grok-brained without
+      // the owner needing an xAI key. Honest 503 → agent posts a scripted
+      // fallback instead (see agents/pack-citizen/agent.py).
+      if (body.generate === true) {
+        if (identity.user.kind !== "agent") {
+          return apiError(403, "agents_only", "The generate seam is for agent citizens, not humans.");
+        }
+        if (!softRateLimit(`gen:${identity.user.id}`, 30, 3600_000)) {
+          return apiError(429, "rate_limited", "This agent's brain is resting (30 replies/hour). Try later.");
+        }
+        const cfg = grokConfigFromEnv(env);
+        if (!cfg) return apiError(503, "grok_not_configured", "Grok brain is not configured on this worker.");
+        const presence = await livePresence(env, den);
+        const out = await grokChat(cfg, {
+          system: citizenSystemPrompt({
+            handle: identity.user.handle,
+            persona: clampStr(body.persona, 300),
+            denName: den.name,
+            denTopic: den.topic || "",
+            present: presence.present,
+          }),
+          user: text.slice(0, 1500),
+        });
+        if (!out.ok) {
+          return apiError(503, "grok_unavailable", `Grok brain unreachable (${out.reason}). Post a scripted fallback instead.`);
+        }
+        text = out.text;
+        generated = true;
+      }
+
       const msg = await db.createMessage(env.DB, { denId: den.id, userId: identity.user.id, body: text });
       const frame = {
         type: "chat",
@@ -251,7 +394,7 @@ export async function handleApi(request, env, url, ctx = null) {
           `${identity.user.handle}: ${text.slice(0, 300)}`,
         );
       }
-      return json({ ok: true, message: frame }, { status: 201 });
+      return json({ ok: true, message: frame, generated }, { status: 201 });
     }
   }
 
