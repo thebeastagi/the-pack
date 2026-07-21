@@ -95,6 +95,21 @@ footer.site{margin-top:96px;padding:32px 0;border-top:1px solid var(--line);
 .mic-dot{width:8px;height:8px;border-radius:999px;background:var(--obsidian-5);display:inline-block}
 .mic-dot.hot{background:var(--den-fire);box-shadow:0 0 8px rgba(255,138,60,.5)}
 
+/* ── den knowledge (wave 2: Collections RAG) ── */
+.kb{margin:0 0 16px;padding:10px 20px;background:var(--obsidian-2);border:1px solid var(--line);border-radius:var(--radius)}
+.kb summary{cursor:pointer;font:500 12px/18px var(--font-m);color:var(--text-dim);list-style:none}
+.kb summary::-webkit-details-marker{display:none}
+.kb .kb-list{display:flex;flex-direction:column;gap:6px;margin:10px 0}
+.kb .kb-empty{font:500 12px/16px var(--font-m);color:var(--text-dim);margin:4px 0}
+.kb .kb-doc{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text)}
+.kb .kb-doc .st{font:500 10px/14px var(--font-m);color:var(--text-dim);border:1px solid var(--line);border-radius:4px;padding:1px 6px}
+.kb .kb-doc .st.ready{color:var(--beast-cyan)}
+.kb .kb-doc button{margin-left:auto;background:none;border:none;color:var(--text-dim);cursor:pointer;font:500 11px/14px var(--font-m)}
+.kb .kb-doc button:hover{color:var(--den-fire)}
+.kb .kb-add{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.kb .kb-add textarea{resize:vertical;background:var(--obsidian-1);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:10px 12px;font:400 13px/18px var(--font-b)}
+.kb .kb-add .kb-status{font:500 11px/14px var(--font-m);color:var(--text-dim)}
+
 /* ── chat ── */
 .chat{background:var(--obsidian-2);border:1px solid var(--line);border-radius:var(--radius);display:flex;flex-direction:column;height:420px}
 .msgs{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:12px}
@@ -274,6 +289,18 @@ ${den.art_url ? `<div class="den-art"><img src="${escapeHtml(den.art_url)}" alt=
   <span class="cost" id="vcost"></span>
 </div>
 
+<details class="kb" id="kb">
+  <summary>📚 den knowledge <span id="kb-count" style="color:var(--text-dim)"></span></summary>
+  <div class="kb-list" id="kb-list"><p class="kb-empty">no documents yet — add lore, notes, or facts the den brain should answer from (with citations)</p></div>
+  ${identity ? `
+  <form class="kb-add" id="kb-add">
+    <input id="kb-name" maxlength="80" placeholder="doc name (e.g. House Rules)" autocomplete="off">
+    <textarea id="kb-content" maxlength="20000" rows="3" placeholder="paste text — up to 20k chars; the den brain searches it and cites it"></textarea>
+    <button class="btn ghost" type="submit">Add to knowledge base</button>
+    <span class="kb-status" id="kb-status"></span>
+  </form>` : '<p class="kb-empty">claim a handle to add knowledge</p>'}
+</details>
+
 <div class="chat">
   <div class="statusline" id="status">connecting…</div>
   <div class="msgs" id="msgs"></div>
@@ -300,6 +327,9 @@ function addMsg(m){
       const img=document.createElement('img');img.src=im[1];img.alt='imagined artwork';img.loading='lazy';
       img.style.cssText='max-width:min(420px,100%);border-radius:8px;margin-top:6px;display:block';
       body.appendChild(img);
+    }else if(line.indexOf('📚 ')===0){
+      const src=document.createElement('span');src.style.cssText='color:var(--text-dim);font-size:12px';
+      src.textContent=line;body.appendChild(src);body.appendChild(document.createElement('br'));
     }else{
       body.appendChild(document.createTextNode(line));body.appendChild(document.createElement('br'));
     }
@@ -368,6 +398,48 @@ function connect(){
   ws.addEventListener('close',()=>{status.textContent='reconnecting…';setTimeout(connect,1500)});
 }
 init();
+
+// ── den knowledge (wave 2: docs the den brain answers from, with citations) ──
+const kbList=$('#kb-list'),kbCount=$('#kb-count'),kbForm=$('#kb-add'),kbStatus=$('#kb-status');
+function kbRender(docs){
+  kbCount.textContent=docs.length?('· '+docs.length+' doc'+(docs.length===1?'':'s')):'';
+  kbList.innerHTML='';
+  if(!docs.length){kbList.innerHTML='<p class="kb-empty">no documents yet — add lore, notes, or facts the den brain should answer from (with citations)</p>';return}
+  docs.forEach(function(d){
+    const row=document.createElement('div');row.className='kb-doc';
+    const nm=document.createElement('span');nm.textContent=d.name;row.appendChild(nm);
+    const st=document.createElement('span');st.className='st'+(d.status==='ready'?' ready':'');
+    st.textContent=d.status==='ready'?'searchable':d.status;row.appendChild(st);
+    const sz=document.createElement('span');sz.style.cssText='color:var(--text-dim);font:500 10px/14px var(--font-m)';
+    sz.textContent=Math.round(d.bytes/10.24)/100+' KB';row.appendChild(sz);
+    const del=document.createElement('button');del.type='button';del.textContent='remove';
+    del.addEventListener('click',async function(){
+      del.disabled=true;
+      const r=await fetch('/api/dens/'+encodeURIComponent(SLUG)+'/docs/'+encodeURIComponent(d.id),{method:'DELETE'});
+      const j=await r.json().catch(function(){return{}});
+      if(j.ok){kbLoad()}else{del.disabled=false;if(kbStatus)kbStatus.textContent=((j.error&&j.error.message)||'could not remove')}
+    });
+    row.appendChild(del);kbList.appendChild(row);
+  });
+}
+async function kbLoad(){
+  const j=await fetch('/api/dens/'+encodeURIComponent(SLUG)+'/docs').then(function(r){return r.json()}).catch(function(){return null});
+  if(j&&j.ok)kbRender(j.docs||[]);
+}
+if(kbForm){
+  kbForm.addEventListener('submit',async function(e){
+    e.preventDefault();
+    const name=$('#kb-name').value.trim(),content=$('#kb-content').value.trim();
+    if(!name||content.length<20){kbStatus.textContent='name + at least 20 chars of content';return}
+    kbStatus.textContent='adding… (indexing takes a few seconds)';
+    const r=await fetch('/api/dens/'+encodeURIComponent(SLUG)+'/docs',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:name,content:content})});
+    const j=await r.json().catch(function(){return{}});
+    if(j.ok){$('#kb-name').value='';$('#kb-content').value='';kbStatus.textContent='added — indexing…';setTimeout(kbLoad,4000)}
+    else kbStatus.textContent=(j.error&&j.error.message)||'could not add';
+    kbLoad();
+  });
+}
+kbLoad();
 
 // ── voice den (campfire voice: you hear the Den Keeper; it hears everyone) ──
 const vbtn=$('#voice-btn'),vstatus=$('#vstatus'),vcost=$('#vcost'),micDot=$('#mic-dot'),fire=$('#fire');

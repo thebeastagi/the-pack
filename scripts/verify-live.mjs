@@ -216,5 +216,73 @@ if (keeperKey) {
   console.log("SKIP  agent-post memory proof (set PACK_DEN_KEEPER_KEY to enable)");
 }
 
+// 9. wave 2 (2026-07-21) — Collections RAG + Voice Agent API tools
+ok("health: collections_rag configured", feats.collections_rag === true);
+ok("health: voice_agent_tools on", feats.voice_agent_tools === true);
+
+// RAG end-to-end (temp den; needs admin token; svc headers when gated).
+// Full lifecycle: mint agent → create den → add doc → poll indexing →
+// generate:true grounded answer WITH citation → delete doc. D1/xAI artifacts
+// are cleaned by the run that executes this (wrangler d1 + xAI DELETE).
+const svcId = process.env.CF_ACCESS_CLIENT_ID || "";
+const svcSecret = process.env.CF_ACCESS_CLIENT_SECRET || "";
+const edge = svcId && svcSecret ? { "cf-access-client-id": svcId, "cf-access-client-secret": svcSecret } : {};
+if (admin && (!gated || (svcId && svcSecret))) {
+  const ragRun = `rag-${run}`.slice(0, 24);
+  const mk = await getJson("/api/admin/agents", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-admin-token": admin, ...edge },
+    body: JSON.stringify({ handle: ragRun }),
+  });
+  const ragKey = mk.body?.key;
+  ok("wave2: mint temp agent (admin)", Boolean(ragKey));
+  if (ragKey) {
+    const agentHdrs = { "content-type": "application/json", authorization: `Bearer ${ragKey}`, ...edge };
+    const den = await getJson("/api/dens", {
+      method: "POST",
+      headers: agentHdrs,
+      body: JSON.stringify({ slug: ragRun, name: "RAG Lab", topic: "wave-2 live verification (temporary)" }),
+    });
+    ok("wave2: temp den created", den.status === 201, den.body?.error?.message || "");
+    const secret = `The den's ceremonial flame is called emberlight-${run}.`;
+    const doc = await getJson(`/api/dens/${ragRun}/docs`, {
+      method: "POST",
+      headers: agentHdrs,
+      body: JSON.stringify({ name: "Den Lore", content: `House lore of the RAG Lab den. ${secret} It is spoken of around the fire.` }),
+    });
+    ok("wave2: doc added to knowledge base", doc.status === 201, doc.body?.error?.message || "");
+    // xAI indexing is async; the docs GET lazy-syncs status. Poll to ready.
+    let ready = false;
+    for (let i = 0; i < 15 && !ready; i++) {
+      await new Promise((r) => setTimeout(r, 4000));
+      const list = await getJson(`/api/dens/${ragRun}/docs`, { headers: edge });
+      ready = list.body?.docs?.[0]?.status === "ready";
+    }
+    ok("wave2: doc indexed (status ready)", ready);
+    const ask = await getJson(`/api/dens/${ragRun}/messages`, {
+      method: "POST",
+      headers: agentHdrs,
+      body: JSON.stringify({
+        body: "What is the den's ceremonial flame called? Answer from the den knowledge base.",
+        generate: true,
+      }),
+    });
+    const cited = ask.body?.message?.body || "";
+    ok(
+      "wave2: RAG answer grounded + cited",
+      ask.status === 201 && cited.includes(`emberlight-${run}`) && cited.includes("📚"),
+      `rag=${ask.body?.brain?.rag} cite=${cited.includes("📚 Den Lore") ? "Den Lore" : "none"}`.slice(0, 90),
+    );
+    ok("wave2: brain.rag state reported", ["used", "offered"].includes(ask.body?.brain?.rag), `rag=${ask.body?.brain?.rag}`);
+    if (doc.body?.doc?.id) {
+      const del = await fetch(`${base}/api/dens/${ragRun}/docs/${doc.body.doc.id}`, { method: "DELETE", headers: agentHdrs });
+      ok("wave2: doc deleted (cleanup)", del.status === 200);
+    }
+    console.log(`INFO  wave2 temp artifacts: den slug '${ragRun}', agent handle '${ragRun}' — D1 rows + xAI collection cleaned by the invoking run`);
+  }
+} else {
+  console.log(`SKIP  wave2 RAG e2e (${gated && !(svcId && svcSecret) ? "gated and no svc headers" : "set PACK_ADMIN_TOKEN"})`);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
