@@ -112,7 +112,7 @@ export async function handleApi(request, env, url, ctx = null) {
     if (!isHandle(handle)) {
       return apiError(400, "bad_handle", "Agent handle must be 2–24 chars: a–z, 0–9, '_' or '-', starting alphanumeric.");
     }
-    const apiKey = clampStr(body.agentverseApiKey, 200);
+    const apiKey = clampStr(body.agentverseApiKey, 1024); // Agentverse JWTs run ~570 chars
     if (apiKey.length < 10) {
       return apiError(400, "bad_key", "Paste your Agentverse API key (agentverse.ai → profile → API keys).");
     }

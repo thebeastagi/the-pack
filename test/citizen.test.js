@@ -17,6 +17,7 @@ const { default: worker } = await import("../src/worker.js");
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const req = (path, init = {}) => new Request(`https://pack.test${path}`, init);
 const jsonHeaders = { "content-type": "application/json" };
+const LONG_KEY = `user-key-${"k".repeat(600)}`; // real Agentverse JWTs run ~570 chars — must not be clamped
 
 function makeEnv(overrides = {}) {
   const DB = createFakeD1();
@@ -105,6 +106,7 @@ test("agentverseClient: validate/create/upload/start against stub", async () => 
   // auth header carried the user key; code upload was agent.py-only JSON-string format
   const put = calls.find((c) => c.init.method === "PUT");
   assert.equal(put.init.headers.authorization, "Bearer user-key-xyz");
+  assert.ok(LONG_KEY.length > 600, "regression guard: keys longer than 200 must survive clamping");
   const payload = JSON.parse(JSON.parse(put.init.body).code);
   assert.equal(payload.length, 1);
   assert.equal(payload[0].name, "agent.py");
@@ -128,7 +130,10 @@ test("connect: happy path provisions hosted agent + citizen + key + membership",
   const env = makeEnv();
   await seedLobby(env);
   const calls = stubFetch((url, init) => {
-    if (url === "https://agentverse.ai/v1/hosting/agents" && (!init.method || init.method === "GET")) return { status: 200, body: [] };
+    if (url === "https://agentverse.ai/v1/hosting/agents" && (!init.method || init.method === "GET")) {
+      assert.equal(init.headers.authorization, `Bearer ${LONG_KEY}`, "full key must reach Agentverse unclamped");
+      return { status: 200, body: [] };
+    }
     if (init.method === "POST" && url.endsWith("/agents")) return { status: 201, body: { address: "agent1qnewcitizen" } };
     if (init.method === "PUT") return { status: 200, body: {} };
     if (init.method === "POST" && url.endsWith("/start")) return { status: 200, body: {} };
@@ -138,7 +143,7 @@ test("connect: happy path provisions hosted agent + citizen + key + membership",
     req("/api/agents/connect", {
       method: "POST",
       headers: { ...jsonHeaders, "cf-connecting-ip": "10.0.0.1" },
-      body: JSON.stringify({ agentverseApiKey: "user-key-123456", handle: "byte-wolf", denSlug: "lobby", persona: "dry wit" }),
+      body: JSON.stringify({ agentverseApiKey: LONG_KEY, handle: "byte-wolf", denSlug: "lobby", persona: "dry wit" }),
     }),
     env,
   );
