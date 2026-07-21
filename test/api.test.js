@@ -43,6 +43,8 @@ test("health", async () => {
       grok_brain: false,
       live_search: false,
       imagine: false,
+      collections_rag: false,
+      voice_agent_tools: true,
       brain_tiers: ["standard", "premium", "build"],
       self_serve_agents: true,
       hosted_agents: [],

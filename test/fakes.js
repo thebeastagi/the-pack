@@ -5,7 +5,10 @@ import { SQL } from "../src/db.js";
 import { DenRoom } from "../src/den-room.js";
 
 export function createFakeD1() {
-  const t = { users: [], sessions: [], agent_keys: [], dens: [], den_members: [], messages: [], voice_usage: [], voice_flags: [], brain_usage: [] };
+  const t = {
+    users: [], sessions: [], agent_keys: [], dens: [], den_members: [], messages: [],
+    voice_usage: [], voice_flags: [], brain_usage: [], den_collections: [], den_docs: [], voice_usage_den: [],
+  };
   const clone = (r) => (r ? structuredClone(r) : r);
   const handlers = {
     [SQL.insertUser]: {
@@ -119,6 +122,40 @@ export function createFakeD1() {
     },
     [SQL.brainUsageDay]: {
       all: (a) => clone(t.brain_usage.filter((r) => r.day === a[0])),
+    },
+    [SQL.denCollectionGet]: { first: (a) => clone(t.den_collections.find((r) => r.den_id === a[0]) || null) },
+    [SQL.denCollectionInsert]: {
+      run(a) {
+        t.den_collections.push({ den_id: a[0], collection_id: a[1], created_at: a[2] });
+      },
+    },
+    [SQL.denDocInsert]: {
+      run(a) {
+        t.den_docs.push({ id: a[0], den_id: a[1], file_id: a[2], name: a[3], bytes: a[4], status: a[5], added_by: a[6], created_at: a[7] });
+      },
+    },
+    [SQL.denDocsByDen]: { all: (a) => clone(t.den_docs.filter((d) => d.den_id === a[0])) },
+    [SQL.denDocById]: { first: (a) => clone(t.den_docs.find((d) => d.id === a[0] && d.den_id === a[1]) || null) },
+    [SQL.denDocSetStatus]: {
+      run(a) {
+        const d = t.den_docs.find((x) => x.id === a[1]);
+        if (d) d.status = a[0];
+      },
+    },
+    [SQL.denDocDelete]: {
+      run(a) {
+        t.den_docs = t.den_docs.filter((d) => d.id !== a[0]);
+      },
+    },
+    [SQL.denDocsCount]: { first: (a) => ({ n: t.den_docs.filter((d) => d.den_id === a[0]).length }) },
+    [SQL.denDocsReadyCount]: { first: (a) => ({ n: t.den_docs.filter((d) => d.den_id === a[0] && d.status === "ready").length }) },
+    [SQL.voiceUsageDenGet]: { first: (a) => clone(t.voice_usage_den.find((r) => r.day === a[0] && r.den === a[1]) || null) },
+    [SQL.voiceUsageDenAdd]: {
+      run(a) {
+        const row = t.voice_usage_den.find((r) => r.day === a[0] && r.den === a[1]);
+        if (row) row.seconds += a[2];
+        else t.voice_usage_den.push({ day: a[0], den: a[1], seconds: a[2] });
+      },
     },
   };
 
