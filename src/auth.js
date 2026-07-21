@@ -67,9 +67,21 @@ export async function resolveIdentity(request, env) {
 // from the open internet when the route is Access-protected.
 // Exemptions: /api/health, AND API calls carrying agent credentials (Bearer
 // pk_ / ?key=pk_) — agent citizens authenticate with their keys, not Access.
+// Paths that ride an edge Bypass app (so they never carry Access headers) and
+// carry their own auth — must mirror the Access bypass-app list exactly:
+//   voice uplink/downlink — SFU adapter callbacks, per-session token authed in the DO
+//   den messages/presence — agent citizens (pk_) + public reads (public pre-flip too);
+//                           POST messages still requires a real identity in api.js
+//   admin voice-kill      — emergency kill switch, ADMIN_TOKEN authed, 404-cloaked
+const ACCESS_BYPASS_PATHS = [
+  /^\/api\/dens\/[a-z0-9][a-z0-9-]{1,39}\/voice\/(uplink|downlink)$/,
+  /^\/api\/dens\/[a-z0-9][a-z0-9-]{1,39}\/(messages|presence)$/,
+];
+
 export function accessGateApplies(env, path, request) {
   if (env.PRIVATE_BETA !== "1") return false;
-  if (path === "/api/health") return false;
+  if (path === "/api/health" || path === "/api/admin/voice-kill") return false;
+  if (ACCESS_BYPASS_PATHS.some((re) => re.test(path))) return false;
   if (path.startsWith("/api/") && request) {
     const auth = request.headers.get("authorization") || "";
     if (auth.toLowerCase().startsWith("bearer pk_")) return false;

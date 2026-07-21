@@ -8,7 +8,7 @@
 name = "beast-pack"
 main = "src/worker.js"
 compatibility_date = "2026-07-21"
-workers_dev = true
+workers_dev = false   # private beta: the only door is pack.thebeastagi.com behind CF Access
 preview_urls = false
 
 routes = [
@@ -17,7 +17,7 @@ routes = [
 
 [vars]
 PACK_VERSION = "0.2.0"
-PRIVATE_BETA = "0"   # "1" = require Cloudflare Access (Robin configures the Access app)
+PRIVATE_BETA = "1"   # Access apps live 2026-07-21 (flip run); lift = "0" + redeploy + remove/disable the main Access app
 HOSTNAME = "pack.thebeastagi.com"
 REALTIME_SFU_APP_ID = "d781a853273752ae764ef806fbb4ee2c"  # fleet raw-SFU app (non-secret id)
 XAI_MODEL = "grok-voice-think-fast-1.0"

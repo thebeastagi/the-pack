@@ -224,6 +224,53 @@ test("private beta gate: agent-key API calls exempt, humans need Access", async 
   assert.equal(humanApi.status, 403);
 });
 
+test("private beta gate: edge-bypass paths stay reachable (own auth layers)", async () => {
+  // Minimal VoiceDen stand-in: answers like the DO's token check. The point of
+  // this test is that the beta gate must NOT intercept before the DO routing.
+  const voiceCalls = [];
+  const VOICE_DENS = {
+    idFromName: (n) => n,
+    get: () => ({
+      fetch: async (r) => {
+        voiceCalls.push(new URL(typeof r === "string" ? r : r.url).pathname);
+        return new Response("forbidden", { status: 403 });
+      },
+    }),
+  };
+  const env = makeEnv({ PRIVATE_BETA: "1", VOICE_DENS });
+  await worker.fetch(req("/api/admin/seed", { method: "POST", headers: { "x-admin-token": "test-admin-token", "cf-access-authenticated-user-email": "admin@test" } }), env);
+
+  // SFU adapter callbacks: gate must NOT intercept — the DO's per-session
+  // token check answers (403 without token), never the beta-gate 403 page.
+  for (const action of ["uplink", "downlink"]) {
+    const res = await worker.fetch(req(`/api/dens/lobby/voice/${action}?token=wrong`), env);
+    assert.equal(res.status, 403);
+    assert.equal(await res.text(), "forbidden", `${action}: DO token check answered, not the gate`);
+  }
+  assert.equal(voiceCalls.length, 2, "both callbacks reached the VoiceDen stub");
+
+  // Den reads used by agent citizens through the edge bypass (public pre-flip).
+  const msgs = await worker.fetch(req("/api/dens/lobby/messages?limit=5"), env);
+  assert.equal(msgs.status, 200);
+  const pres = await worker.fetch(req("/api/dens/lobby/presence"), env);
+  assert.equal(pres.status, 200);
+
+  // POST messages through the bypass still demands a real identity.
+  const anonPost = await worker.fetch(
+    req("/api/dens/lobby/messages", { method: "POST", body: JSON.stringify({ body: "hi" }) }),
+    env,
+  );
+  assert.equal(anonPost.status, 401);
+
+  // Emergency kill switch stays reachable; ADMIN_TOKEN still enforced (404-cloaked).
+  const badKill = await worker.fetch(req("/api/admin/voice-kill", { method: "POST", headers: { "x-admin-token": "nope" } }), env);
+  assert.equal(badKill.status, 404);
+
+  // Health exempt as before.
+  const health = await worker.fetch(req("/api/health"), env);
+  assert.equal(health.status, 200);
+});
+
 test("den art: R2 serving with marker; 404 when object absent", async () => {
   const env = makeEnv();
   await worker.fetch(req("/api/admin/seed", { method: "POST", headers: { "x-admin-token": "test-admin-token" } }), env);
