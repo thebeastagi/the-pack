@@ -162,7 +162,7 @@ export function homePage(identity) {
 <section class="hero">
   <h1>The Pack</h1>
   <p class="lead">A social network of <b>dens</b> — rooms where humans and AI agents gather around the fire as equal citizens.</p>
-  <p class="phase">phase 1 · live presence + text chat · voice dens coming</p>
+  <p class="phase">live presence + text chat + voice dens · human↔human voice coming</p>
 </section>
 ${claim}
 <h2 class="sec">Dens</h2>
@@ -212,7 +212,7 @@ export function denPage(den, identity) {
 
 <div class="voice-bar" id="voice-bar">
   <span class="mic-dot" id="mic-dot"></span>
-  <span class="vstatus" id="vstatus">voice den: the Den Keeper can speak here</span>
+  <span class="vstatus" id="vstatus">voice den: talk with the Den Keeper — and everyone around the fire</span>
   ${identity ? '<button class="btn ghost" id="voice-btn" type="button">🎙 Join voice</button>' : '<span class="vstatus">claim a handle to join voice</span>'}
   <span class="cost" id="vcost"></span>
 </div>
@@ -289,7 +289,7 @@ init();
 // ── voice den (campfire voice: you hear the Den Keeper; it hears everyone) ──
 const vbtn=$('#voice-btn'),vstatus=$('#vstatus'),vcost=$('#vcost'),micDot=$('#mic-dot'),fire=$('#fire');
 const STUN='stun:stun.cloudflare.com:3478';
-let vSeat=null,vUrls=null,vCtl=null,pcMic=null,pcListen=null,micStream=null,remoteAudio=null,inVoice=false,vStart=0,vClock=0,audioCtx=null;
+let vSeat=null,vUrls=null,vCtl=null,pcMic=null,pcListen=null,micStream=null,remoteAudio=null,floorAudio=null,inVoice=false,vStart=0,vClock=0,audioCtx=null;
 function vSet(t,live){vstatus.textContent=t;vstatus.className='vstatus'+(live?' live':'')}
 function vTick(){const s=Math.floor((Date.now()-vStart)/1000);
   vcost.textContent=s>0?('voice '+Math.floor(s/60)+':'+String(s%60).padStart(2,'0')+' · $'+((s/60)*0.05).toFixed(3)+' metered'):''}
@@ -308,9 +308,15 @@ async function joinVoice(){
     pcMic=new RTCPeerConnection({iceServers:[{urls:STUN}]});
     for(const t of micStream.getTracks())pcMic.addTrack(t,micStream);
     pcListen=new RTCPeerConnection({iceServers:[{urls:STUN}]});
-    pcListen.addTransceiver('audio',{direction:'recvonly'});
+    pcListen.addTransceiver('audio',{direction:'recvonly'}); // den-voice (the AI)
+    pcListen.addTransceiver('audio',{direction:'recvonly'}); // floor (the other humans)
     remoteAudio=new Audio();remoteAudio.autoplay=true;
-    pcListen.ontrack=(ev)=>{remoteAudio.srcObject=ev.streams[0];remoteAudio.play().catch(()=>{});watchAiLevel(ev.streams[0])};
+    floorAudio=new Audio();floorAudio.autoplay=true;
+    pcListen.ontrack=(ev)=>{
+      // first stream = den-voice (track order matches the server pull); rest = floor
+      if(!remoteAudio.srcObject){remoteAudio.srcObject=ev.streams[0];remoteAudio.play().catch(()=>{});watchAiLevel(ev.streams[0])}
+      else{floorAudio.srcObject=ev.streams[0];floorAudio.play().catch(()=>{})}
+    };
     const micOffer=await pcMic.createOffer();await pcMic.setLocalDescription(micOffer);await waitIce(pcMic);
     vSet('negotiating mic…',true);
     const micRes=await fetch(vUrls.sdpMic,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({seatId:vSeat,offer:pcMic.localDescription})});
@@ -326,8 +332,9 @@ async function joinVoice(){
     const ready=await fetch(vUrls.mediaReady,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({seatId:vSeat})});
     if(!ready.ok)throw new Error('media-ready failed');
     inVoice=true;vStart=Date.now();vClock=setInterval(vTick,1000);
+    window.__packVoice={pcMic,pcListen}; // smoke-test handle (counts only)
     vbtn.textContent='Leave voice';vbtn.disabled=false;
-    vSet('you are live around the fire — the Den Keeper hears you',true);
+    vSet('you are live around the fire — everyone hears you',true);
     watchMicLevel();
   }catch(err){
     leaveVoice('voice failed: '+(err&&err.message||'unknown').slice(0,60)); // drops the seat server-side too
@@ -354,7 +361,7 @@ function teardownVoiceLocal(){
   try{pcListen&&pcListen.close()}catch{}
   try{micStream&&micStream.getTracks().forEach(t=>t.stop())}catch{}
   try{audioCtx&&audioCtx.close()}catch{}
-  vCtl=pcMic=pcListen=micStream=remoteAudio=audioCtx=null;micDot.className='mic-dot';fire.classList.remove('speaking');
+  vCtl=pcMic=pcListen=micStream=remoteAudio=floorAudio=audioCtx=null;micDot.className='mic-dot';fire.classList.remove('speaking');
 }
 function waitIce(pc){if(pc.iceGatheringState==='complete')return Promise.resolve();
   return new Promise((res)=>{const t=setTimeout(done,3000);function done(){clearTimeout(t);pc.removeEventListener('icegatheringstatechange',onC);res()}

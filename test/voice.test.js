@@ -127,13 +127,20 @@ test("xai events: session update shape + error classification + transcripts", ()
 
 // ── VoiceDen DO lifecycle (all I/O faked) ────────────────────────────────────
 function fakeSfu() {
-  const state = { sessions: 0, adapters: [], closed: [], pulls: 0 };
+  const state = { sessions: 0, adapters: [], closed: [], pulls: [], failNextMic: false };
   return {
     state,
     async createSession() { return `sess-${++state.sessions}`; },
-    async addTracksAutoDiscover() { return { audioTrackName: "mic-track", json: { sessionDescription: { type: "answer", sdp: "mic-answer" } } }; },
-    async pullRemoteTrack() { state.pulls++; return { sessionDescription: { type: "answer", sdp: "listen-answer" } }; },
-    async createIngestAdapter(trackName, endpoint) { state.adapters.push({ kind: "ingest", trackName, endpoint }); return { sessionId: "ing-1", adapterId: "ad-ing", trackName }; },
+    async addTracksAutoDiscover() {
+      if (state.failNextMic) { state.failNextMic = false; throw new Error("SFU addTracksAutoDiscover failed: 500"); }
+      return { audioTrackName: "mic-track", json: { sessionDescription: { type: "answer", sdp: "mic-answer" } } };
+    },
+    async pullRemoteTrack(playerId, pubId, trackName, offer) { state.pulls.push([{ trackName }]); return { sessionDescription: { type: "answer", sdp: "listen-answer" } }; },
+    async pullRemoteTracks(playerId, trackSpecs, offer) { state.pulls.push(trackSpecs); return { sessionDescription: { type: "answer", sdp: "listen-answer" } }; },
+    async createIngestAdapter(trackName, endpoint) {
+      state.adapters.push({ kind: "ingest", trackName, endpoint });
+      return { sessionId: `ing-${state.adapters.length}`, adapterId: `ad-ing-${state.adapters.length}`, trackName };
+    },
     async createEgressAdapter(sessionId, trackName, endpoint) { state.adapters.push({ kind: "egress", sessionId, trackName, endpoint }); return { adapterId: `ad-eg-${state.adapters.length}`, json: {} }; },
     async closeAdapter(id) { state.closed.push(id); return { ok: true, alreadyClosed: false, status: 200 }; },
   };
@@ -215,8 +222,10 @@ test("voice den: full happy path join→sdp→media-ready; disclosure AFTER medi
   assert.match(forced[0].item.content[0].text, /Den Keeper/);
   assert.equal(forced[0].item.interruptible, false);
 
-  // adapters: 1 shared ingest + 1 seat egress; egress endpoint carries seat + token
-  assert.equal(sfu.state.adapters.filter((a) => a.kind === "ingest").length, 1);
+  // adapters: shared den-voice ingest + seat floor ingest + seat egress
+  const ing = sfu.state.adapters.filter((a) => a.kind === "ingest");
+  assert.equal(ing.filter((a) => a.trackName === "den-voice").length, 1);
+  assert.equal(ing.filter((a) => a.trackName.startsWith("floor-")).length, 1);
   const eg = sfu.state.adapters.find((a) => a.kind === "egress");
   assert.match(eg.endpoint, /token=/);
   assert.match(eg.endpoint, /seat=/);
@@ -344,4 +353,88 @@ test("voice den: idle waiting_media session auto-closes after 120s (no idle spen
   await room.guardTick();
   assert.equal(room.state, "closed");
   assert.equal(room.guard.killReason, "idle_timeout");
+});
+
+// ── P2.5: human↔human floor tracks ──────────────────────────────────────────
+test("floor: each seat gets a floor ingest adapter + pulls BOTH tracks", async () => {
+  const { room, sfu } = setupDen();
+  const a = await joinAndBridge(room);
+  const joinB = await (await room.fetch(post("lobby", "join", { ...joinBody, handle: "b-human" }))).json();
+  await room.fetch(post("lobby", "sdp-mic", { seatId: joinB.seatId, offer: { type: "offer", sdp: "o" } }));
+  await room.fetch(post("lobby", "sdp-listen", { seatId: joinB.seatId, offer: { type: "offer", sdp: "o" } }));
+
+  // 3 ingest adapters: den-voice + floor-A + floor-B
+  const ingests = sfu.state.adapters.filter((x) => x.kind === "ingest");
+  assert.equal(ingests.length, 3);
+  assert.equal(ingests.filter((x) => x.trackName === "den-voice").length, 1);
+  assert.equal(ingests.filter((x) => x.trackName.startsWith("floor-")).length, 2);
+  assert.ok(ingests[1].endpoint.includes("seat="));
+
+  // sdp-listen pulled den-voice + own floor in ONE negotiation
+  const pull = sfu.state.pulls.at(-1);
+  assert.equal(pull.length, 2);
+  assert.equal(pull[0].trackName, "den-voice");
+  assert.ok(pull[1].trackName.startsWith("floor-"));
+});
+
+test("floor mixing: A speaks -> B's floor gets it, A's floor does NOT, xAI hears all", async () => {
+  const { room, xai } = setupDen();
+  const a = await joinAndBridge(room);
+  const b = await joinAndBridge(room); // second seat on same session
+  const seatA = room.seats.get(a.seatId);
+  const seatB = room.seats.get(b.seatId);
+
+  // A feeds 40ms of tone
+  const stereo = new Uint8Array(3840 * 2);
+  for (let i = 0; i < stereo.length; i += 4) {
+    new DataView(stereo.buffer).setInt16(i, 1000, true);
+    new DataView(stereo.buffer).setInt16(i + 2, 1000, true);
+  }
+  await room.onUplinkFrame(seatA, { data: encodePacket({ sequenceNumber: 1, timestamp: 1, payload: stereo }) });
+
+  // run two mixer ticks manually (tick body, timers unref'd in tests)
+  for (let tick = 0; tick < 2; tick++) {
+    const frames = new Map();
+    for (const seat of room.seats.values()) frames.set(seat.seatId, room.takeFromSeat(seat, 1920));
+    for (const dest of room.seats.values()) {
+      const parts = [];
+      let heard = false;
+      for (const [srcId, frame] of frames) {
+        if (srcId === dest.seatId) continue;
+        parts.push(frame);
+        if (frame) heard = true;
+      }
+      if (!heard) continue;
+      const { mixMono, monoToStereo } = await import("../src/voice/pcm.js");
+      const mono = mixMono(parts, 1920);
+      for (const chunk of dest.floorChunker.feed(monoToStereo(mono))) dest.floorPacer.push(chunk);
+    }
+  }
+
+  assert.ok(seatB.floorPacer.bufferedFrames > 0, "B floor has A's audio");
+  assert.equal(seatA.floorPacer.bufferedFrames, 0, "A floor silent (self excluded)");
+});
+
+test("floor: seat cap (fire_full) + seat failure drops seat, session survives", async () => {
+  const { room, sfu } = setupDen();
+  // fill to cap
+  for (let i = 0; i < 8; i++) {
+    const j = await (await room.fetch(post("lobby", "join", { ...joinBody, handle: `s${i}` }))).json();
+    assert.ok(j.ok, `seat ${i}`);
+  }
+  const ninth = await room.fetch(post("lobby", "join", { ...joinBody, handle: "s9" }));
+  assert.equal(ninth.status, 429);
+  assert.equal((await ninth.json()).error, "fire_full");
+
+  // a seat's sdp-mic failure drops THAT seat; the session keeps bridging for others
+  const d2 = setupDen();
+  const a = await joinAndBridge(d2.room);
+  const joinB = await (await d2.room.fetch(post("lobby", "join", { ...joinBody, handle: "unlucky" }))).json();
+  d2.sfu.state.failNextMic = true;
+  const micRes = await d2.room.fetch(post("lobby", "sdp-mic", { seatId: joinB.seatId, offer: { type: "offer", sdp: "o" } }));
+  assert.equal(micRes.status, 500);
+  assert.equal((await micRes.json()).error, "seat_failed");
+  assert.equal(d2.room.state, "bridging", "session survives a seat failure");
+  assert.ok(!d2.room.seats.has(joinB.seatId), "failed seat dropped");
+  assert.ok(d2.room.seats.has(a.seatId), "healthy seat remains");
 });

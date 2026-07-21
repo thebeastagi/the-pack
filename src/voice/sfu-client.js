@@ -53,11 +53,21 @@ export class SfuClient {
 
   /** Browser pull of a remote track (den-voice) into its session. */
   async pullRemoteTrack(playerSessionId, publisherSessionId, trackName, sessionDescription) {
+    return this.pullRemoteTracks(
+      playerSessionId,
+      [{ sessionId: publisherSessionId, trackName }],
+      sessionDescription,
+    );
+  }
+
+  /** Pull MULTIPLE remote tracks in ONE negotiation (one offer consumed once —
+   * the 425 lesson). trackSpecs: [{ sessionId, trackName }]. */
+  async pullRemoteTracks(playerSessionId, trackSpecs, sessionDescription) {
     const { status, text } = await this.post(`/sessions/${playerSessionId}/tracks/new`, {
       sessionDescription,
-      tracks: [{ location: "remote", sessionId: publisherSessionId, trackName, kind: "audio" }],
+      tracks: trackSpecs.map((t) => ({ location: "remote", sessionId: t.sessionId, trackName: t.trackName, kind: "audio" })),
     });
-    if (status < 200 || status >= 300) throw new Error(`SFU pullRemoteTrack failed: ${status}`);
+    if (status < 200 || status >= 300) throw new Error(`SFU pullRemoteTracks failed: ${status}`);
     return JSON.parse(text);
   }
 

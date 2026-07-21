@@ -40,6 +40,8 @@ function unrefable(t) {
 
 const MIX_FRAME_BYTES = frameBytes(XAI_RATE, XAI_CHANNELS, PACER_FRAME_MS); // 1920
 const SEAT_QUEUE_CAP_BYTES = XAI_RATE * XAI_CHANNELS * 2 * 2; // 2s per seat
+const MAX_SEATS = 8; // bounds O(N²) floor mixing + SFU egress bandwidth
+const FLOOR_TRACK_PREFIX = "floor-"; // per-seat "everyone but me" track
 
 /** Production xAI connector: fetch-Upgrade carries Authorization (Workers
  * outbound WS with custom headers). https:// URL form required for upgrades. */
@@ -124,6 +126,9 @@ export class VoiceDen {
     const kind = body.kind === "agent" ? "agent" : "human";
     const denName = String(body.denName || this.denSlug).slice(0, 60);
     const denTopic = String(body.denTopic || "").slice(0, 140);
+    if (this.seats.size >= MAX_SEATS) {
+      return json({ error: "fire_full", detail: `This fire seats ${MAX_SEATS} — try another den or come back later.` }, 429);
+    }
 
     // A warm DO instance that already closed a session resets and starts fresh.
     if (this.state === "closed" || this.state === "failed") {
@@ -177,11 +182,32 @@ export class VoiceDen {
     }
 
     const seatId = randomToken(8);
-    this.seats.set(seatId, {
+    // Per-seat "floor" ingest adapter (DO -> SFU track everyone-but-me). A
+    // failure here fails THIS seat only — never an already-live session.
+    const seat = {
       seatId, handle, kind,
       micSessionId: null, micTrackName: null, egressAdapterId: null,
       uplinkWs: null, queue: [], queueBytes: 0, bytesUp: 0, healed: 0, joinedAt: this.now(),
-    });
+      floorTrackName: `${FLOOR_TRACK_PREFIX}${seatId}`,
+      floorAdapterId: null, floorSessionId: null,
+      floorWs: null, floorPacer: new DownlinkPacer(), floorChunker: new Chunker(frameBytes(SFU_RATE, SFU_CHANNELS, PACER_FRAME_MS)),
+      floorBytes: 0,
+    };
+    // Register the seat BEFORE creating its floor adapter: the SFU validates
+    // ingest endpoints with a live WS handshake at creation time, and the
+    // handler 404s unknown seats (live-observed 2026-07-21: 503 otherwise).
+    this.seats.set(seatId, seat);
+    try {
+      const host = this.env.HOSTNAME;
+      const floorEndpoint = `wss://${host}/api/dens/${this.denSlug}/voice/downlink?token=${this.adapterToken}&seat=${seatId}`;
+      const floor = await this.sfu.createIngestAdapter(seat.floorTrackName, floorEndpoint);
+      seat.floorAdapterId = floor.adapterId;
+      seat.floorSessionId = floor.sessionId;
+    } catch (err) {
+      this.seats.delete(seatId);
+      if (this.seats.size === 0 && this.state !== "bridging") throw err; // cold-start: fail-closed
+      return json({ error: "seat_floor_failed", detail: String(err?.message || err).slice(0, 80) }, 500);
+    }
     this.broadcastControls({ type: "seats", seats: this.seatList() });
     const base = `/api/dens/${this.denSlug}/voice`;
     return json({
@@ -211,13 +237,19 @@ export class VoiceDen {
     if (!seat) return json({ error: "unknown_seat" }, 404);
     if (!body.offer?.sdp) return json({ error: "offer_required" }, 400);
 
-    seat.micSessionId = await this.sfu.createSession();
-    const discovered = await this.sfu.addTracksAutoDiscover(seat.micSessionId, body.offer);
-    seat.micTrackName = discovered.audioTrackName ?? null;
-    if (!seat.micTrackName) throw new Error("SFU: no audio track discovered in mic offer");
-    const answer = discovered.json?.sessionDescription;
-    if (!answer) throw new Error("SFU: no sessionDescription in tracks/new response");
-    return json({ answer });
+    try {
+      seat.micSessionId = await this.sfu.createSession();
+      const discovered = await this.sfu.addTracksAutoDiscover(seat.micSessionId, body.offer);
+      seat.micTrackName = discovered.audioTrackName ?? null;
+      if (!seat.micTrackName) throw new Error("SFU: no audio track discovered in mic offer");
+      const answer = discovered.json?.sessionDescription;
+      if (!answer) throw new Error("SFU: no sessionDescription in tracks/new response");
+      return json({ answer });
+    } catch (err) {
+      // A seat's failure must never kill a live session (P2.5 multi-human).
+      await this.dropSeat(seat.seatId, KillReason.ADAPTER_LOST);
+      return json({ error: "seat_failed", detail: String(err?.message || err).slice(0, 80) }, 500);
+    }
   }
 
   async handleSdpListen(request) {
@@ -226,14 +258,19 @@ export class VoiceDen {
     const seat = this.seats.get(String(body.seatId || ""));
     if (!seat) return json({ error: "unknown_seat" }, 404);
     if (!body.offer?.sdp) return json({ error: "offer_required" }, 400);
-    if (!this.ingestSessionId) throw new Error("no downlink session");
+    if (!this.ingestSessionId || !seat.floorSessionId) throw new Error("no downlink session");
 
     const listenerSessionId = await this.sfu.createSession();
     let answer = null, lastErr = null;
-    // 425 "Too Early": den-voice media may race the pull — bounded retry.
+    // ONE negotiation pulls BOTH tracks: den-voice (the AI) + this seat's
+    // floor (everyone-but-me, mixed in the DO). 425 "Too Early" race: retry.
+    const trackSpecs = [
+      { sessionId: this.ingestSessionId, trackName: DOWNLINK_TRACK_NAME },
+      { sessionId: seat.floorSessionId, trackName: seat.floorTrackName },
+    ];
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        answer = await this.sfu.pullRemoteTrack(listenerSessionId, this.ingestSessionId, DOWNLINK_TRACK_NAME, body.offer);
+        answer = await this.sfu.pullRemoteTracks(listenerSessionId, trackSpecs, body.offer);
         lastErr = null;
         break;
       } catch (err) {
@@ -242,9 +279,15 @@ export class VoiceDen {
         await new Promise((r) => setTimeout(r, 400));
       }
     }
-    if (lastErr) throw lastErr;
+    if (lastErr) {
+      await this.dropSeat(seat.seatId, KillReason.ADAPTER_LOST);
+      return json({ error: "seat_failed", detail: String(lastErr?.message || lastErr).slice(0, 80) }, 500);
+    }
     const sessionDescription = answer?.sessionDescription;
-    if (!sessionDescription) throw new Error("SFU: no sessionDescription in pull response");
+    if (!sessionDescription) {
+      await this.dropSeat(seat.seatId, KillReason.ADAPTER_LOST);
+      return json({ error: "seat_failed", detail: "no sessionDescription in pull response" }, 500);
+    }
     return json({ answer: sessionDescription });
   }
 
@@ -270,7 +313,10 @@ export class VoiceDen {
         await new Promise((r) => setTimeout(r, 500));
       }
     }
-    if (lastErr) throw lastErr;
+    if (lastErr) {
+      await this.dropSeat(seat.seatId, KillReason.ADAPTER_LOST);
+      return json({ error: "seat_failed", detail: String(lastErr?.message || lastErr).slice(0, 80) }, 500);
+    }
 
     // Self-heal keyed on FRAMES (bytesUp), not attach — an adapter registered
     // before mic media flows can attach-but-never-stream (live-observed).
@@ -315,10 +361,12 @@ export class VoiceDen {
     const seat = this.seats.get(seatId);
     if (!seat) return;
     this.seats.delete(seatId);
-    if (seat.egressAdapterId) {
-      try { await this.sfu.closeAdapter(seat.egressAdapterId); } catch {}
+    for (const id of [seat.egressAdapterId, seat.floorAdapterId]) {
+      if (!id) continue;
+      try { await this.sfu.closeAdapter(id); } catch {}
     }
     try { seat.uplinkWs?.close(1000, "seat left"); } catch {}
+    try { seat.floorWs?.close(1000, "seat left"); } catch {}
     const ctl = this.controls.get(seatId);
     if (ctl) {
       this.sendControl(ctl, { type: "ended", reason });
@@ -365,17 +413,32 @@ export class VoiceDen {
 
   handleDownlinkWs(request, url) {
     if (!this.tokenOk(url)) return new Response("forbidden", { status: 403 });
+    // ?seat= routes the socket to that seat's floor stream; bare = shared AI voice.
+    const seatId = url.searchParams.get("seat");
+    const seat = seatId ? this.seats.get(seatId) : null;
+    if (seatId && !seat) return new Response("unknown seat", { status: 404 });
     const pair = new WebSocketPair();
     const server = pair[1];
     server.accept();
-    try { this.downlink?.close(1000, "superseded"); } catch {}
-    this.downlink = server;
-    server.addEventListener("close", () => {
-      if (this.downlink === server) this.downlink = null;
-    });
-    server.addEventListener("error", () => {
-      if (this.downlink === server) this.downlink = null;
-    });
+    if (seat) {
+      try { seat.floorWs?.close(1000, "superseded"); } catch {}
+      seat.floorWs = server;
+      server.addEventListener("close", () => {
+        if (seat.floorWs === server) seat.floorWs = null;
+      });
+      server.addEventListener("error", () => {
+        if (seat.floorWs === server) seat.floorWs = null;
+      });
+    } else {
+      try { this.downlink?.close(1000, "superseded"); } catch {}
+      this.downlink = server;
+      server.addEventListener("close", () => {
+        if (this.downlink === server) this.downlink = null;
+      });
+      server.addEventListener("error", () => {
+        if (this.downlink === server) this.downlink = null;
+      });
+    }
     return this.upgrade(pair[0]);
   }
 
@@ -500,34 +563,66 @@ export class VoiceDen {
 
   // ----------------------------------------------------------------- timers
   startTimers() {
-    // Downlink pacer: exact real-time 20ms cadence into the SFU ingest adapter.
+    // Downlink pacers: exact real-time 20ms cadence into the SFU ingest
+    // adapters — the shared AI voice + each seat's floor (everyone-but-me).
     this.pacerTimer = unrefable(setInterval(() => {
-      if (!this.downlink) return; // hold until SFU attaches
-      const frame = this.pacer.pop();
-      if (!frame) return;
-      const pkt = encodeIngestFrame(frame);
-      if (pkt.length <= SFU_WS_CHUNK_BYTES) {
-        try {
-          this.downlink.send(pkt);
-        } catch {}
+      if (this.downlink) {
+        const frame = this.pacer.pop();
+        if (frame) {
+          const pkt = encodeIngestFrame(frame);
+          if (pkt.length <= SFU_WS_CHUNK_BYTES) {
+            try { this.downlink.send(pkt); } catch {}
+          }
+        }
+      }
+      for (const seat of this.seats.values()) {
+        if (!seat.floorWs) continue; // hold until the SFU attaches
+        const frame = seat.floorPacer.pop();
+        if (!frame) continue;
+        const pkt = encodeIngestFrame(frame);
+        if (pkt.length <= SFU_WS_CHUNK_BYTES) {
+          try {
+            seat.floorWs.send(pkt);
+            seat.floorBytes += frame.length;
+          } catch {}
+        }
       }
     }, PACER_FRAME_MS));
 
-    // Uplink mixer: 20ms int16 sum of all seat queues -> xAI (it hears everyone).
+    // Unified mixer tick: take each seat's 20ms frame ONCE, then fan out:
+    // (a) xAI hears EVERYONE (single mixed mono stream);
+    // (b) each seat's floor hears everyone BUT that seat (human↔human audio).
     this.mixerTimer = unrefable(setInterval(() => {
-      if (this.state !== "bridging" || !this.xai) return;
+      if (this.state !== "bridging") return;
       this.counts.mixTicks++;
-      const parts = [];
+      const frames = new Map(); // seatId -> Uint8Array | null
       let anyAudio = false;
       for (const seat of this.seats.values()) {
         const take = this.takeFromSeat(seat, MIX_FRAME_BYTES);
+        frames.set(seat.seatId, take);
         if (take) anyAudio = true;
-        parts.push(take);
       }
-      const mixed = anyAudio ? mixMono(parts, MIX_FRAME_BYTES) : new Uint8Array(MIX_FRAME_BYTES);
-      try {
-        this.xai.send(mixed);
-      } catch {}
+      // (a) xAI leg (unchanged behavior; continuous stream incl. silence)
+      if (this.xai) {
+        const mixed = anyAudio ? mixMono([...frames.values()], MIX_FRAME_BYTES) : new Uint8Array(MIX_FRAME_BYTES);
+        try {
+          this.xai.send(mixed);
+        } catch {}
+      }
+      // (b) floor legs (only when someone else actually spoke — silence otherwise)
+      for (const dest of this.seats.values()) {
+        const parts = [];
+        let heard = false;
+        for (const [srcId, frame] of frames) {
+          if (srcId === dest.seatId) continue;
+          parts.push(frame);
+          if (frame) heard = true;
+        }
+        if (!heard) continue;
+        const mono = mixMono(parts, MIX_FRAME_BYTES);
+        const stereo = monoToStereo(mono);
+        for (const chunk of dest.floorChunker.feed(stereo)) dest.floorPacer.push(chunk);
+      }
     }, PACER_FRAME_MS));
 
     this.guardTimer = unrefable(setInterval(() => {
@@ -601,7 +696,10 @@ export class VoiceDen {
       } catch {}
     }
 
-    const adapterIds = [this.ingestAdapterId, ...[...this.seats.values()].map((s) => s.egressAdapterId)].filter(Boolean);
+    const adapterIds = [
+      this.ingestAdapterId,
+      ...[...this.seats.values()].flatMap((s) => [s.egressAdapterId, s.floorAdapterId]),
+    ].filter(Boolean);
     for (const id of adapterIds) {
       try {
         await this.sfu.closeAdapter(id);
@@ -611,6 +709,7 @@ export class VoiceDen {
     try { this.downlink?.close(1000, "voice den closed"); } catch {}
     for (const seat of this.seats.values()) {
       try { seat.uplinkWs?.close(1000, "voice den closed"); } catch {}
+      try { seat.floorWs?.close(1000, "voice den closed"); } catch {}
     }
     this.xai = this.downlink = null;
 
@@ -634,6 +733,8 @@ export class VoiceDen {
   }
 
   statusRecord() {
+    let floorBytes = 0;
+    for (const s of this.seats.values()) floorBytes += s.floorBytes;
     return {
       state: this.state,
       seats: this.seats.size,
@@ -641,7 +742,7 @@ export class VoiceDen {
       estCostUsd: this.guard ? Math.round(this.guard.estimateCostUsd(this.now()) * 10000) / 10000 : 0,
       killReason: this.guard?.killReason ?? KillReason.NONE,
       bufferedMs: this.pacer.bufferedMs,
-      counts: { ...this.counts, pacer: { ...this.pacer.stats } },
+      counts: { ...this.counts, floorBytes, pacer: { ...this.pacer.stats } },
     };
   }
 }
