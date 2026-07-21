@@ -10,8 +10,11 @@ export function randomToken(bytes = 32) {
   return [...buf].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export async function sha256Hex(text) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+export async function sha256Hex(data) {
+  // Accepts strings OR raw bytes (Uint8Array/ArrayBuffer views) — webhook
+  // verification hashes the raw request body, never its decoded text.
+  const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 

@@ -4,6 +4,8 @@
 #   ADMIN_TOKEN        — admin API (agent creation, seeding, voice kill flag)
 #   XAI_API_KEY        — xAI Realtime key (voice dens; server-side only)
 #   REALTIME_SFU_SECRET— SFU App Secret (Bearer for rtc.live.cloudflare.com)
+#   ALLSCALE_API_KEY   — AllScale store API key (credit checkout signing)
+#   ALLSCALE_API_SECRET— AllScale store API secret (HMAC sign + webhook verify)
 
 name = "beast-pack"
 main = "src/worker.js"
@@ -16,7 +18,7 @@ routes = [
 ]
 
 [vars]
-PACK_VERSION = "0.6.0"
+PACK_VERSION = "0.7.0"
 # Access gate stays ON post-launch (2026-07-21 public flip): the main app policy
 # is now "everyone" — any email via one-time code. Verified email = signup + abuse
 # guard. Full lift (no gate at all) = "0" + redeploy + remove/disable the main app.
@@ -45,6 +47,16 @@ PACK_DEN_DOCS_CAP = "20"              # max docs per den knowledge base (≤20KB
 PACK_VOICE_TOOLS = "1"                # "0" = no tools key on voice sessions at all
 PACK_VOICE_SEARCH_DEFAULT = "1"       # "0" = no web/X tools in voice (den file_search unaffected)
 PACK_VOICE_DEN_MIN_CAP = "10"         # voice minutes / den / UTC day (global day cap stays 30)
+# v0.7.0 (2026-07-21, phase-1 monetisation) — den-fire credits. The PACK_*
+# caps above (search/image/RAG counts + daily USD) are HARD infrastructure
+# ceilings (absolute for everyone, paying or not). The PACK_FREE_* vars below
+# define the free pool; past it, the caller's own credits pay per call
+# (burn = max(floor, 2× real USD cost)).
+PRICE_MULTIPLIER = "2.0"              # credit burn = ceil(real_ticks × this × 100 / 1e10), floored per surface
+PACK_FREE_SEARCH_DEN_CAP = "20"       # free live-search replies / den / UTC day (was 40)
+PACK_FREE_IMAGE_DEN_CAP = "3"         # free /imagine paintings / den / UTC day (was 15)
+PACK_FREE_DAILY_USD_CAP = "2.00"      # global free-spend fuse / UTC day (was $5 — now the hard ceiling above)
+ALLSCALE_BASE_URL = "https://openapi.allscale.io"  # AllScale OpenAPI (key/secret stay secrets)
 # Phase 2.7 — Agentverse Memory + provenance + hosted agents (non-secret config;
 # AM_API_KEY + PACK_SIGNING_KEY_JWK stay `wrangler secret put` only).
 AM_BASE_URL = "https://am-server-jbneh74b5q-uc.a.run.app"

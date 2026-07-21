@@ -65,6 +65,39 @@ export const SQL = {
   voiceUsageDenGet: "SELECT seconds FROM voice_usage_den WHERE day = ? AND den = ?",
   voiceUsageDenAdd:
     "INSERT INTO voice_usage_den (day, den, seconds) VALUES (?, ?, ?) ON CONFLICT(day, den) DO UPDATE SET seconds = seconds + excluded.seconds",
+  // ── credits + payments (migration 0008) ─────────────────────────────────
+  creditBalanceGet: "SELECT balance FROM credit_balances WHERE user_id = ?",
+  // The money gate: balance can never go negative, and a raced concurrent
+  // debit simply changes 0 rows (caller treats that as insufficient).
+  creditDebit:
+    "UPDATE credit_balances SET balance = balance - ? WHERE user_id = ? AND balance >= ?",
+  creditGrant:
+    "INSERT INTO credit_balances (user_id, balance) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET balance = balance + excluded.balance",
+  // Settle-scoped variants: the grant/ledger only apply while the order is
+  // still 'created' INSIDE the same batch transaction, so a replayed or raced
+  // settle is a zero-side-effect no-op (exactly-once at the SQL level).
+  creditGrantIfOrderCreated:
+    "INSERT INTO credit_balances (user_id, balance) SELECT ?, ? WHERE EXISTS (SELECT 1 FROM payment_orders WHERE id = ? AND status = 'created') ON CONFLICT(user_id) DO UPDATE SET balance = balance + excluded.balance",
+  creditLedgerInsertIfOrderCreated:
+    "INSERT INTO credit_ledger (id, user_id, delta, kind, ref, balance_after, created_at) SELECT ?, ?, ?, ?, ?, balance, ? FROM credit_balances WHERE user_id = ? AND EXISTS (SELECT 1 FROM payment_orders WHERE id = ? AND status = 'created')",
+  // Ledger rows always read balance AFTER the mutation inside the same batch.
+  creditLedgerInsert:
+    "INSERT INTO credit_ledger (id, user_id, delta, kind, ref, balance_after, created_at) SELECT ?, ?, ?, ?, ?, balance, ? FROM credit_balances WHERE user_id = ?",
+  creditLedgerDelete: "DELETE FROM credit_ledger WHERE id = ?",
+  creditLedgerRecent:
+    "SELECT id, delta, kind, ref, balance_after, created_at FROM credit_ledger WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+
+  paymentOrderInsert:
+    "INSERT INTO payment_orders (id, user_id, provider, provider_ref, order_ref, sku, amount_cents, credits, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  paymentOrderSetRef: "UPDATE payment_orders SET provider_ref = ? WHERE id = ?",
+  paymentOrderById: "SELECT * FROM payment_orders WHERE id = ?",
+  paymentOrderByRef: "SELECT * FROM payment_orders WHERE provider = ? AND provider_ref = ?",
+  // The settle gate: only a still-'created' order can settle — replay/double
+  // delivery changes 0 rows and the caller answers 409.
+  paymentOrderSettle:
+    "UPDATE payment_orders SET status = 'settled', settled_at = ? WHERE id = ? AND status = 'created'",
+  paymentOrdersRecent:
+    "SELECT id, provider, provider_ref, order_ref, sku, amount_cents, credits, status, created_at, settled_at FROM payment_orders WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
 };
 
 export async function createUser(db, { handle, displayName = "", email = null, kind = "human" }) {
@@ -203,6 +236,51 @@ export async function addBrainUsage(db, day, den, kind, calls, ticks) {
 
 export async function listBrainUsage(db, day) {
   const res = await db.prepare(SQL.brainUsageDay).bind(day).all();
+  return res.results || [];
+}
+
+// ── credits + payments (migration 0008) ────────────────────────────────────
+// Low-level row helpers only — the money-safety choreography (guarded debit,
+// batch-atomic ledger, idempotent settle) lives in src/credits.js and
+// src/payments.js so it can be tested as one unit.
+
+export async function getCreditBalance(db, userId) {
+  const row = await db.prepare(SQL.creditBalanceGet).bind(userId).first();
+  return Number(row?.balance) || 0;
+}
+
+export async function listCreditLedger(db, userId, limit = 20) {
+  const res = await db
+    .prepare(SQL.creditLedgerRecent)
+    .bind(userId, Math.min(Math.max(limit, 1), 50))
+    .all();
+  return res.results || [];
+}
+
+export async function createPaymentOrder(db, { id, userId, provider, orderRef, sku, amountCents, credits }) {
+  await db
+    .prepare(SQL.paymentOrderInsert)
+    .bind(id, userId, provider, null, orderRef, sku, amountCents, credits, "created", nowIso())
+    .run();
+}
+
+export async function setPaymentOrderRef(db, id, providerRef) {
+  await db.prepare(SQL.paymentOrderSetRef).bind(providerRef, id).run();
+}
+
+export async function getPaymentOrderById(db, id) {
+  return db.prepare(SQL.paymentOrderById).bind(id).first();
+}
+
+export async function getPaymentOrderByRef(db, provider, providerRef) {
+  return db.prepare(SQL.paymentOrderByRef).bind(provider, providerRef).first();
+}
+
+export async function listPaymentOrders(db, userId, limit = 20) {
+  const res = await db
+    .prepare(SQL.paymentOrdersRecent)
+    .bind(userId, Math.min(Math.max(limit, 1), 50))
+    .all();
   return res.results || [];
 }
 

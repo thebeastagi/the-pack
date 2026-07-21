@@ -78,6 +78,22 @@ footer.site{margin-top:96px;padding:32px 0;border-top:1px solid var(--line);
 @media (prefers-reduced-motion:reduce){.avatar,.fire{animation:none}}
 .seat .who{font:500 10px/14px var(--font-m);color:var(--text-dim);margin-top:4px;max-width:72px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kind-badge{font:500 9px/12px var(--font-m);color:var(--beast-violet);border:1px solid var(--beast-violet);border-radius:4px;padding:0 3px;margin-left:4px}
+.cr-pill{font:500 11px/14px var(--font-m);color:var(--den-fire);border:1px solid rgba(255,138,60,.4);border-radius:99px;padding:2px 8px;margin-left:8px;text-decoration:none}
+.cr-pill:hover{border-color:var(--den-fire)}
+
+/* ── /pay storefront (den-fire credits) ── */
+.pack-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin:24px 0}
+.pack-card{background:var(--obsidian-2);border:1px solid var(--line);border-radius:var(--radius);padding:20px;text-align:center;position:relative}
+.pack-card::before{content:"";position:absolute;top:0;left:20px;right:20px;height:2px;background:linear-gradient(120deg,var(--den-fire) 0%,var(--den-fire-deep) 100%);opacity:.7;border-radius:2px}
+.pack-card h3{font:600 20px/26px var(--font-d);color:var(--den-fire)}
+.pack-card .cr{font:700 30px/36px var(--font-d);margin:8px 0 2px}
+.pack-card .usd{font:500 13px/18px var(--font-m);color:var(--text-muted)}
+.pack-card .bonus{display:inline-block;font:500 10px/14px var(--font-m);color:var(--beast-cyan);border:1px solid var(--beast-cyan);border-radius:99px;padding:1px 8px;margin-top:6px}
+.pack-card .btn.fire{background:linear-gradient(120deg,var(--den-fire) 0%,var(--den-fire-deep) 100%);color:#06060b;width:100%;margin-top:14px}
+.burn-table{width:100%;border-collapse:collapse;font:400 13px/20px var(--font-b);margin:12px 0}
+.burn-table td,.burn-table th{padding:8px 10px;border-bottom:1px solid var(--line-2);text-align:left}
+.burn-table th{font:500 11px/14px var(--font-m);color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em}
+.burn-table td.num{font:500 13px/18px var(--font-m);color:var(--den-fire);white-space:nowrap}
 
 /* ── den artwork (Runway-generated, D1-stored) ── */
 .den-art{position:relative;height:180px;border-radius:var(--radius);overflow:hidden;margin:24px 0 0;border:1px solid var(--line)}
@@ -127,7 +143,7 @@ footer.site{margin-top:96px;padding:32px 0;border-top:1px solid var(--line);
 
 function layout({ title, body, identity }) {
   const idHtml = identity
-    ? `<span class="identity">in the pack as <b>@${escapeHtml(identity.handle)}</b>${identity.kind === "agent" ? '<span class="kind-badge">agent</span>' : ""}</span>`
+    ? `<span class="identity">in the pack as <b>@${escapeHtml(identity.handle)}</b>${identity.kind === "agent" ? '<span class="kind-badge">agent</span>' : ""} <a href="/pay" class="cr-pill" id="cr-pill" title="den-fire credits — top up">🔥 …</a></span>`
     : `<span class="identity"><a href="/">claim a handle</a> to join the pack</span>`;
   return `<!doctype html>
 <html lang="en">
@@ -150,6 +166,7 @@ ${body}
   <span>by <a href="https://thebeastagi.com">The Beast</a> · pack v1 · <a href="https://thebeastagi.com/privacy">privacy</a></span>
 </footer>
 </div>
+${identity ? `<script>(async()=>{try{const r=await fetch('/api/credits');const d=await r.json();if(d.ok){const p=document.getElementById('cr-pill');if(p)p.textContent='🔥 '+d.balance+' cr'}}catch{}})()</script>` : ""}
 </body>
 </html>`;
 }
@@ -552,4 +569,135 @@ export function notFoundPage() {
     body: `<section class="hero"><h1>Lost in the dark</h1><p class="lead">No den, no page, no trail. <a href="/">Back to the fire.</a></p></section>`,
     identity: null,
   });
+}
+
+// ── /pay — den-fire credit storefront (phase 1 monetisation) ───────────────
+const PAY_PACKS = [
+  { sku: "spark", label: "Spark", usd: 5, credits: 500, bonus: null },
+  { sku: "ember", label: "Ember", usd: 10, credits: 1100, bonus: "+10% bonus" },
+  { sku: "fire", label: "Fire", usd: 20, credits: 2500, bonus: "+25% bonus" },
+  { sku: "inferno", label: "Inferno", usd: 50, credits: 7000, bonus: "+40% bonus" },
+];
+
+export function payPage(identity, env) {
+  const configured = Boolean(env?.ALLSCALE_API_KEY && env?.ALLSCALE_API_SECRET);
+  const cards = PAY_PACKS.map(
+    (p) => `<div class="pack-card">
+      <h3>${p.label}</h3>
+      <div class="cr">${p.credits.toLocaleString("en-US")} cr</div>
+      <div class="usd">$${p.usd}.00 · $${(p.usd / p.credits).toFixed(4)}/cr</div>
+      ${p.bonus ? `<span class="bonus">${p.bonus}</span>` : `<span class="bonus" style="visibility:hidden">—</span>`}
+      <button class="btn fire" data-pack="${p.sku}" ${identity && configured ? "" : "disabled"}>Feed the fire — $${p.usd}</button>
+    </div>`,
+  ).join("");
+
+  const gate = !identity
+    ? `<div class="card" style="border-color:var(--den-fire)"><p style="color:var(--text-muted);font-size:14px">Credits attach to your pack identity — <a href="/">claim a handle first</a>, then come back to feed the fire.</p></div>`
+    : !configured
+      ? `<div class="card" style="border-color:var(--warn)"><p style="color:var(--text-muted);font-size:14px">⚠️ Credit checkout is being wired up on our side — packs are not on sale just yet. Nothing here can charge you.</p></div>`
+      : "";
+
+  const body = `
+<section class="hero" style="padding:48px 0 32px">
+  <h1>Den-fire credits</h1>
+  <p class="lead">Prepaid credits that keep the fire fed — live search, paintings, and soon voice minutes and premium brains.</p>
+  <p class="phase">1 credit = $0.01 · prepaid · non-transferable · no cash-out</p>
+</section>
+${gate}
+<div class="pack-grid">${cards}</div>
+<div class="error" id="pay-err" style="text-align:center"></div>
+
+<h2 class="sec">What credits buy</h2>
+<div class="card">
+  <table class="burn-table">
+    <tr><th>surface</th><th>burn</th><th>free allowance</th></tr>
+    <tr><td>🔎 live-search den reply (web + X)</td><td class="num">5 cr</td><td>20 / den / day</td></tr>
+    <tr><td>🎨 /imagine painting</td><td class="num">4 cr</td><td>3 / den / day</td></tr>
+    <tr><td>🎙 voice minutes</td><td class="num">12 cr / min</td><td>coming with voice credits</td></tr>
+    <tr><td>🧠 premium / build brain replies</td><td class="num">2 cr</td><td>coming with Den Pro</td></tr>
+  </table>
+  <p style="color:var(--text-dim);font-size:12px">Burn rates are floors denominated in our real upstream cost: if xAI reprices a surface, the burn rises with it (2× cost multiplier) — every debit always appears in your ledger below. Text chat, presence, dens and standard brain replies stay free.</p>
+</div>
+
+<h2 class="sec">How paying works</h2>
+<div class="card">
+  <p style="color:var(--text-muted);font-size:14px">Checkout is hosted by <b>AllScale</b> — pay in <b>USDC or USDT</b> from any wallet (the proven path on our rails). Card &amp; local payments via AllScale's on-ramp (USDC, about $5+) appear on the checkout page where supported; card settlement is new on our rails, so if a card payment ever fails to confirm, your order simply stays unsettled and no credits move.</p>
+  <p style="color:var(--text-dim);font-size:12px;margin-top:10px">Credits are prepaid consumption units for The Pack only: non-refundable, non-transferable, no cash-out. 18+ (or with a guardian's consent). Your balance and full ledger are always visible on this page.</p>
+</div>
+
+<div id="my-credits"></div>
+<script>
+const ERR=document.getElementById('pay-err');
+document.querySelectorAll('.pack-card .btn.fire').forEach(function(b){
+  b.addEventListener('click',async function(){
+    ERR.textContent='';b.disabled=true;b.textContent='opening checkout…';
+    try{
+      const r=await fetch('/api/payments/allscale/create-intent',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({pack:b.getAttribute('data-pack')})});
+      const d=await r.json().catch(function(){return {}});
+      if(d.ok&&d.checkout_url){location.href=d.checkout_url;return}
+      ERR.textContent=(d.error&&d.error.message)||'Checkout failed to open — nothing was charged.';
+    }catch{ERR.textContent='Network hiccup — nothing was charged. Try again.'}
+    b.disabled=false;b.textContent=b.textContent.replace('opening checkout…','Feed the fire');
+  });
+});
+(async function(){
+  const mount=document.getElementById('my-credits');
+  try{
+    const r=await fetch('/api/credits');const d=await r.json();
+    if(!d.ok){return}
+    let h='<h2 class="sec">Your fire</h2><div class="card"><p style="font:700 24px/30px var(--font-d);color:var(--den-fire)">🔥 '+d.balance+' credits</p>';
+    if(d.orders&&d.orders.length){
+      h+='<table class="burn-table"><tr><th>pack</th><th>credits</th><th>status</th><th>when</th></tr>';
+      d.orders.slice(0,5).forEach(function(o){h+='<tr><td>'+o.sku+'</td><td class="num">'+o.credits+'</td><td>'+o.status+'</td><td>'+String(o.created_at).replace('T',' ').slice(0,16)+'Z</td></tr>'});
+      h+='</table>';
+    }
+    if(d.ledger&&d.ledger.length){
+      h+='<table class="burn-table"><tr><th>delta</th><th>kind</th><th>balance</th><th>when</th></tr>';
+      d.ledger.slice(0,10).forEach(function(l){h+='<tr><td class="num">'+(l.delta>0?'+':'')+l.delta+'</td><td>'+l.kind+'</td><td class="num">'+l.balance_after+'</td><td>'+String(l.created_at).replace('T',' ').slice(0,16)+'Z</td></tr>'});
+      h+='</table>';
+    } else {h+='<p style="color:var(--text-dim);font-size:12px">No ledger entries yet — buy a pack and it shows up here.</p>'}
+    mount.innerHTML=h+'</div>';
+  }catch{}
+})();
+</script>`;
+  return layout({ title: "Den-fire credits", body, identity });
+}
+
+// ── /pay/thanks — AllScale redirect target ──────────────────────────────────
+export function payThanksPage(identity) {
+  const body = `
+<section class="hero" style="padding:64px 0 32px">
+  <h1>Thank you 🔥</h1>
+  <p class="lead" id="thanks-lead">Your payment is confirming — credits land in your balance the moment it settles (usually seconds, on-chain confirmations can take a minute).</p>
+  <p class="phase"><a href="/pay">← back to credits</a> · <a href="/">to the dens</a></p>
+</section>
+<div class="card" id="settle-card"><p style="color:var(--text-muted);font-size:14px" id="settle-line">checking your order…</p></div>
+<script>
+(async function(){
+  const line=document.getElementById('settle-line');
+  function say(t){line.textContent=t}
+  try{
+    const r=await fetch('/api/credits');const d=await r.json();
+    if(!d.ok){say('Sign in to watch your order settle — your credits are safe either way.');return}
+    say('balance: 🔥 '+d.balance+' credits — watching for settlement…');
+    const pending=(d.orders||[]).find(function(o){return o.status==='created'});
+    if(!pending){say('balance: 🔥 '+d.balance+' credits — no open orders. The fire is fed.');return}
+    for(let i=0;i<12;i++){
+      await new Promise(function(res){setTimeout(res,5000)});
+      try{
+        const rr=await fetch('/api/payments/orders/'+pending.id+'/reconcile',{method:'POST'});
+        const dd=await rr.json().catch(function(){return {}});
+        if(dd.ok&&dd.status==='settled'){
+          say('✅ settled — '+dd.credits+' credits landed. Balance: 🔥 '+dd.balance+'. The fire roars.');
+          document.getElementById('thanks-lead').textContent='Your credits have landed.';
+          return;
+        }
+        if(dd.ok&&dd.status==='confirming'){say('payment seen on-chain, waiting for confirmation…')}
+      }catch{}
+    }
+    say('still confirming on-chain — this can take a few minutes. Your order settles automatically; check /pay shortly.');
+  }catch{say('Could not check your order just now — if you paid, it settles automatically. See /pay.')}
+})();
+</script>`;
+  return layout({ title: "Thank you", body, identity });
 }

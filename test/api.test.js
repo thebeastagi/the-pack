@@ -46,6 +46,8 @@ test("health", async () => {
       collections_rag: false,
       voice_agent_tools: true,
       brain_tiers: ["standard", "premium", "build"],
+      credits: true,
+      payments: "unconfigured",
       self_serve_agents: true,
       hosted_agents: [],
     },

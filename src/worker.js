@@ -4,7 +4,8 @@ import { accessGateApplies, accessGateOk, resolveIdentity } from "./auth.js";
 import { getDenBySlug } from "./db.js";
 import { DenRoom } from "./den-room.js";
 import { VoiceDen } from "./voice/voice-den.js";
-import { denPage, homePage, notFoundPage } from "./pages.js";
+import { denPage, homePage, notFoundPage, payPage, payThanksPage } from "./pages.js";
+import { handleAllScaleWebhook } from "./payments.js";
 import { apiError, clientIp, escapeHtml, softRateLimit } from "./util.js";
 
 export { DenRoom, VoiceDen };
@@ -103,6 +104,13 @@ export default {
     const path = url.pathname;
 
     try {
+      // AllScale payment webhook — registered BEFORE the Access gate
+      // (authenticated by AllScale's HMAC, not by Access/session; mirrored in
+      // ACCESS_BYPASS_PATHS + a CF Access bypass app — edge/worker lockstep).
+      if (path === "/api/payments/allscale/webhook" && request.method === "POST") {
+        return withSecurityHeaders(await handleAllScaleWebhook(request, env, url, ctx));
+      }
+
       // Optional private-beta gate (Cloudflare Access fronted; off by default).
       if (accessGateApplies(env, path, request) && !accessGateOk(request)) {
         return withSecurityHeaders(
@@ -180,6 +188,16 @@ export default {
       if (path === "/") {
         const identity = await resolveIdentity(request, env);
         return withSecurityHeaders(html(homePage(identity?.user || null)));
+      }
+
+      // Credit storefront + return page (phase 1 monetisation).
+      if (path === "/pay" || path === "/pay/") {
+        const identity = await resolveIdentity(request, env);
+        return withSecurityHeaders(html(payPage(identity?.user || null, env)));
+      }
+      if (path === "/pay/thanks") {
+        const identity = await resolveIdentity(request, env);
+        return withSecurityHeaders(html(payThanksPage(identity?.user || null)));
       }
 
       const denMatch = path.match(/^\/den\/([a-z0-9][a-z0-9-]{1,39})$/);

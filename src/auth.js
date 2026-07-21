@@ -75,9 +75,12 @@ export async function resolveIdentity(request, env) {
 //   admin voice-kill      — emergency kill switch, ADMIN_TOKEN authed, 404-cloaked
 //   den memory recall     — read-only, rate-limited (phase 2.7; public proof of memory)
 //   aevs pubkey           — static public verification key (no risk in being public)
+//   allscale webhook      — HMAC-authenticated payment notifications (phase 1
+//                           monetisation; ALSO routed before the gate in worker.js)
 const ACCESS_BYPASS_PATHS = [
   /^\/api\/dens\/[a-z0-9][a-z0-9-]{1,39}\/voice\/(uplink|downlink)$/,
   /^\/api\/dens\/[a-z0-9][a-z0-9-]{1,39}\/(messages|presence|memory)$/,
+  /^\/api\/payments\/allscale\/webhook$/,
 ];
 
 export function accessGateApplies(env, path, request) {

@@ -183,10 +183,71 @@ if (admin && !gated) {
 
 // 8. phase 2.7 — Agentverse Memory + provenance + hosted agents
 const feats = health.body?.features || {};
-ok("health: version ≥ 0.3.0", typeof health.body?.version === "string" && health.body.version >= "0.3.0", `v=${health.body?.version}`);
+ok("health: version ≥ 0.7.0", typeof health.body?.version === "string" && health.body.version >= "0.7.0", `v=${health.body?.version}`);
 ok("health: agentverse_memory configured", feats.agentverse_memory === true);
 ok("health: provenance_signing configured", feats.provenance_signing === true);
 ok("health: hosted agent (den-keeper) declared", feats.hosted_agents?.[0]?.address?.startsWith("agent1q"), feats.hosted_agents?.[0]?.address || "none");
+ok("health: credits feature live", feats.credits === true);
+ok("health: payments state known", ["allscale", "unconfigured"].includes(feats.payments), `payments=${feats.payments}`);
+
+// 9. phase 1 monetisation — $0-cost probes only (never moves money):
+//    webhook gate rejects garbage pre-Access-gate; credits/intent demand auth.
+//    Until ALLSCALE secrets are set the correct postures are 503 (fail-closed);
+//    with secrets: forged/unsigned webhooks → 401. NEVER accepts 200 here.
+const whUnsigned = await fetch(`${base}/api/payments/allscale/webhook`, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ hello: "world" }),
+  redirect: "manual",
+});
+const whUnsignedBody = await whUnsigned.json().catch(() => null);
+ok(
+  "webhook: unsigned POST rejected pre-gate (401/503, never 200)",
+  [401, 503].includes(whUnsigned.status) && whUnsigned.status !== 302,
+  `status=${whUnsigned.status} code=${whUnsignedBody?.error?.code}`,
+);
+const whForged = await fetch(`${base}/api/payments/allscale/webhook`, {
+  method: "POST",
+  headers: {
+    "content-type": "application/json",
+    "X-Webhook-Id": "whk_forge",
+    "X-Webhook-Timestamp": String(Math.floor(Date.now() / 1000)),
+    "X-Webhook-Nonce": "forge",
+    "X-Webhook-Signature": "v1=forged",
+  },
+  body: JSON.stringify({ webhook_id: "whk_forge" }),
+  redirect: "manual",
+});
+ok(
+  "webhook: forged signature rejected (401, or 503 while unconfigured)",
+  [401, 503].includes(whForged.status),
+  `status=${whForged.status}`,
+);
+
+const credsAnon = await fetch(`${base}/api/credits`, { redirect: "manual" });
+ok(
+  "GET /api/credits demands identity (or gate)",
+  gated ? credsAnon.status === 302 : credsAnon.status === 401,
+  `status=${credsAnon.status}`,
+);
+const intentAnon = await fetch(`${base}/api/payments/allscale/create-intent`, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ pack: "spark" }),
+  redirect: "manual",
+});
+ok(
+  "POST create-intent demands identity (or gate) — no anonymous intents",
+  gated ? intentAnon.status === 302 : intentAnon.status === 401,
+  `status=${intentAnon.status}`,
+);
+const payPageRes = await fetch(`${base}/pay`, { redirect: "manual" });
+if (gated) {
+  ok("GET /pay behind Access gate (302)", payPageRes.status === 302);
+} else {
+  const payHtml = await payPageRes.text();
+  ok("GET /pay renders den-fire credits storefront", payPageRes.status === 200 && payHtml.includes("Den-fire credits"));
+}
 
 const pub = await getJson("/api/aevs/pubkey");
 ok("GET /api/aevs/pubkey (public verification key)", pub.status === 200 && pub.body?.jwk?.kty === "EC" && pub.body?.alg === "ES256" && pub.body?.jwk?.d === undefined);

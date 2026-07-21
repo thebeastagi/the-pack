@@ -8,6 +8,7 @@ export function createFakeD1() {
   const t = {
     users: [], sessions: [], agent_keys: [], dens: [], den_members: [], messages: [],
     voice_usage: [], voice_flags: [], brain_usage: [], den_collections: [], den_docs: [], voice_usage_den: [],
+    credit_balances: [], credit_ledger: [], payment_orders: [],
   };
   const clone = (r) => (r ? structuredClone(r) : r);
   const handlers = {
@@ -157,6 +158,115 @@ export function createFakeD1() {
         else t.voice_usage_den.push({ day: a[0], den: a[1], seconds: a[2] });
       },
     },
+
+    // ── credits + payments (migration 0008) ────────────────────────────────
+    [SQL.creditBalanceGet]: {
+      first: (a) => clone(t.credit_balances.find((r) => r.user_id === a[0]) || null),
+    },
+    [SQL.creditDebit]: {
+      run(a) {
+        const row = t.credit_balances.find((r) => r.user_id === a[1]);
+        if (!row || row.balance < a[0]) return { changes: 0 }; // the money gate
+        row.balance -= a[0];
+        return { changes: 1 };
+      },
+    },
+    [SQL.creditGrant]: {
+      run(a) {
+        const row = t.credit_balances.find((r) => r.user_id === a[0]);
+        if (row) row.balance += a[1];
+        else t.credit_balances.push({ user_id: a[0], balance: a[1] });
+        return { changes: 1 };
+      },
+    },
+    [SQL.creditLedgerInsert]: {
+      // INSERT ... SELECT balance FROM credit_balances WHERE user_id = ? —
+      // inserts nothing when the balance row does not exist (SQL semantics).
+      run(a) {
+        const bal = t.credit_balances.find((r) => r.user_id === a[6]);
+        if (!bal) return { changes: 0 };
+        t.credit_ledger.push({ id: a[0], user_id: a[1], delta: a[2], kind: a[3], ref: a[4], balance_after: bal.balance, created_at: a[5] });
+        return { changes: 1 };
+      },
+    },
+    [SQL.creditLedgerDelete]: {
+      run(a) {
+        const n = t.credit_ledger.length;
+        t.credit_ledger = t.credit_ledger.filter((r) => r.id !== a[0]);
+        return { changes: n - t.credit_ledger.length };
+      },
+    },
+    [SQL.creditGrantIfOrderCreated]: {
+      // EXISTS(order still 'created') guard — replay/race = zero side effects.
+      run(a) {
+        const o = t.payment_orders.find((x) => x.id === a[2]);
+        if (!o || o.status !== "created") return { changes: 0 };
+        const row = t.credit_balances.find((r) => r.user_id === a[0]);
+        if (row) row.balance += a[1];
+        else t.credit_balances.push({ user_id: a[0], balance: a[1] });
+        return { changes: 1 };
+      },
+    },
+    [SQL.creditLedgerInsertIfOrderCreated]: {
+      run(a) {
+        const o = t.payment_orders.find((x) => x.id === a[7]);
+        if (!o || o.status !== "created") return { changes: 0 };
+        const bal = t.credit_balances.find((r) => r.user_id === a[6]);
+        if (!bal) return { changes: 0 };
+        t.credit_ledger.push({ id: a[0], user_id: a[1], delta: a[2], kind: a[3], ref: a[4], balance_after: bal.balance, created_at: a[5] });
+        return { changes: 1 };
+      },
+    },
+    [SQL.creditLedgerRecent]: {
+      all: (a) =>
+        clone(
+          t.credit_ledger
+            .filter((r) => r.user_id === a[0])
+            .sort((x, y) => (x.created_at < y.created_at ? 1 : -1))
+            .slice(0, a[1]),
+        ),
+    },
+    [SQL.paymentOrderInsert]: {
+      run(a) {
+        if (a[3] && t.payment_orders.some((o) => o.provider === a[2] && o.provider_ref === a[3])) {
+          throw new Error("UNIQUE constraint failed: payment_orders.provider, payment_orders.provider_ref");
+        }
+        t.payment_orders.push({
+          id: a[0], user_id: a[1], provider: a[2], provider_ref: a[3], order_ref: a[4],
+          sku: a[5], amount_cents: a[6], credits: a[7], status: a[8], created_at: a[9], settled_at: null,
+        });
+        return { changes: 1 };
+      },
+    },
+    [SQL.paymentOrderSetRef]: {
+      run(a) {
+        const o = t.payment_orders.find((x) => x.id === a[1]);
+        if (o) { o.provider_ref = a[0]; return { changes: 1 }; }
+        return { changes: 0 };
+      },
+    },
+    [SQL.paymentOrderById]: { first: (a) => clone(t.payment_orders.find((o) => o.id === a[0]) || null) },
+    [SQL.paymentOrderByRef]: {
+      first: (a) => clone(t.payment_orders.find((o) => o.provider === a[0] && o.provider_ref === a[1]) || null),
+    },
+    [SQL.paymentOrderSettle]: {
+      run(a) {
+        const o = t.payment_orders.find((x) => x.id === a[1]);
+        if (!o || o.status !== "created") return { changes: 0 }; // the replay gate
+        o.status = "settled";
+        o.settled_at = a[0];
+        return { changes: 1 };
+      },
+    },
+    [SQL.paymentOrdersRecent]: {
+      all: (a) =>
+        clone(
+          t.payment_orders
+            .filter((o) => o.user_id === a[0])
+            .sort((x, y) => (x.created_at < y.created_at ? 1 : -1))
+            .slice(0, a[1]),
+        ),
+    },
   };
 
   return {
@@ -165,11 +275,26 @@ export function createFakeD1() {
       const h = handlers[sql];
       if (!h) throw new Error(`fake D1: unhandled SQL: ${sql}`);
       const bound = (args) => ({
+        _sql: sql,
         async first() { return h.first ? h.first(args) : null; },
         async all() { return { results: h.all ? h.all(args) : [] }; },
-        async run() { if (h.run) h.run(args); return { success: true, meta: { changes: 1 } }; },
+        async run() {
+          const out = h.run ? h.run(args) : undefined;
+          return { success: true, meta: { changes: out && typeof out.changes === "number" ? out.changes : 1 } };
+        },
       });
       return { bind: (...args) => bound(args), ...bound([]) };
+    },
+    // D1 batch: statements execute sequentially as one transaction; per-statement
+    // results mirror D1's { success, meta } for writes and { results } for reads.
+    async batch(stmts) {
+      const out = [];
+      for (const s of stmts) {
+        if (s._sql && handlers[s._sql] && handlers[s._sql].run) out.push(await s.run());
+        else if (s._sql && handlers[s._sql] && handlers[s._sql].all) out.push(await s.all());
+        else out.push({ results: [await s.first()] });
+      }
+      return out;
     },
   };
 }

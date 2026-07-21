@@ -18,7 +18,7 @@ import {
   imageModelFromEnv,
   isBrainTier,
 } from "./grok.js";
-import { brainAllowed, brainCapsFromEnv, logBrainUsage, todayKey } from "./caps.js";
+import { brainAllowed, brainAllowedOrBurn, brainCapsFromEnv, logBrainUsage, todayKey } from "./caps.js";
 import {
   addDocument,
   collectionsConfigFromEnv,
@@ -28,6 +28,8 @@ import {
   removeDocument,
   uploadTextFile,
 } from "./collections.js";
+import { CREDIT_SKUS, settleBurn } from "./credits.js";
+import { allScaleConfigured, handleCreateIntent, handleReconcile } from "./payments.js";
 import { agentverseClient, renderCitizenAgent } from "./onboarding.js";
 import {
   apiError, clampStr, clientIp, isHandle, isSlug, json, randomToken, safeEqualHex, sha256Hex, softRateLimit,
@@ -82,6 +84,8 @@ export async function handleApi(request, env, url, ctx = null) {
         collections_rag: Boolean(grokConfigFromEnv(env)) && env.PACK_RAG_DEFAULT !== "0",
         voice_agent_tools: env.PACK_VOICE_TOOLS !== "0",
         brain_tiers: Object.keys(BRAIN_TIERS),
+        credits: true,
+        payments: allScaleConfigured(env) ? "allscale" : "unconfigured",
         self_serve_agents: true,
         hosted_agents: env.DEN_KEEPER_AGENT_ADDRESS
           ? [{ handle: "den-keeper", platform: "agentverse", address: env.DEN_KEEPER_AGENT_ADDRESS }]
@@ -263,6 +267,36 @@ export async function handleApi(request, env, url, ctx = null) {
       if (token) await db.deleteSession(env.DB, await sha256Hex(token));
     }
     return json({ ok: true }, { headers: { "set-cookie": clearSessionCookieHeader() } });
+  }
+
+  // ── credits + payments (phase 1 monetisation) ───────────────────────────
+  // Balance + audit trail for the caller. Agents hold balances like humans.
+  if (path === "/api/credits" && method === "GET") {
+    const identity = await resolveIdentity(request, env);
+    if (!identity) return apiError(401, "unauthorized", "Authenticate (session or agent key) to see credits.");
+    const [balance, ledger, orders] = await Promise.all([
+      db.getCreditBalance(env.DB, identity.user.id),
+      db.listCreditLedger(env.DB, identity.user.id, 20),
+      db.listPaymentOrders(env.DB, identity.user.id, 10),
+    ]);
+    return json({ ok: true, balance, ledger, orders });
+  }
+
+  // Buy a credit pack (AllScale hosted checkout). Session/agent-key authed —
+  // credits must attach to a known user (tighter than the dashboard's public
+  // create-intent by design). Amounts are SKU-enum restricted server-side.
+  if (path === "/api/payments/allscale/create-intent" && method === "POST") {
+    const identity = await resolveIdentity(request, env);
+    if (!identity) return apiError(401, "unauthorized", "Claim a handle first — credits attach to your pack identity.");
+    return handleCreateIntent(request, env, identity, CREDIT_SKUS);
+  }
+
+  // Settlement polling for the shared-store topology (see src/payments.js).
+  const reconcileMatch = path.match(/^\/api\/payments\/orders\/([0-9a-f-]{36})\/reconcile$/);
+  if (reconcileMatch && method === "POST") {
+    const identity = await resolveIdentity(request, env);
+    if (!identity) return apiError(401, "unauthorized", "Authenticate to check your order.");
+    return handleReconcile(request, env, identity, reconcileMatch[1]);
   }
 
   // ── dens ────────────────────────────────────────────────────────────────
@@ -468,6 +502,7 @@ export async function handleApi(request, env, url, ctx = null) {
       let generated = false;
       let imagined = false;
       let brain = null;
+      let paidBurn = null; // { kind, burned, balance } when credits paid for this call
 
       // ── /imagine (any citizen): paint an image into the den via xAI
       // Imagine (~$0.002/img). Spend-capped per den + globally (fail closed);
@@ -485,16 +520,21 @@ export async function handleApi(request, env, url, ctx = null) {
         if (!cfg || !env.MEDIA) {
           return apiError(503, "imagine_not_configured", "Imagine is not configured on this worker.");
         }
-        const cap = await brainAllowed(env, den.slug, "image");
+        const cap = await brainAllowedOrBurn(env, den.slug, "image", identity.user.id);
         if (!cap.allowed) {
           const why =
             cap.reason === "daily_usd_cap"
               ? "the pack's daily brain budget is spent — the fire rests until tomorrow (UTC)"
-              : cap.reason === "den_cap"
-                ? `this den painted its daily share (${cap.cap}/day) — try tomorrow`
-                : "the imagine budget is resting — try later";
+              : cap.reason === "den_hard_cap" || cap.reason === "global_hard_cap"
+                ? "the pack's painting safety limit is reached for today — the fire rests until tomorrow (UTC)"
+                : cap.insufficient
+                  ? `this den used its ${cap.cap} free paintings today and your balance (${cap.balance} credits) can't cover a paid one (${cap.burn} credits) — top up at /pay`
+                  : cap.reason === "den_cap"
+                    ? `this den painted its free daily share (${cap.cap}/day) — try tomorrow or top up at /pay`
+                    : "the imagine budget is resting — try later";
           return apiError(429, "imagine_capped", `No image this time: ${why}. Nothing was charged.`);
         }
+        if (cap.paid) paidBurn = { kind: "image", burned: cap.burned, balance: cap.balance };
         const out = await grokImage(cfg, { prompt, model: imageModelFromEnv(env) });
         if (!out.ok) {
           return apiError(503, "imagine_unavailable", `The fire couldn't paint that (${out.reason}). Nothing was charged.`);
@@ -506,6 +546,7 @@ export async function handleApi(request, env, url, ctx = null) {
         const name = `${den.slug}-${randomToken(8)}`;
         await env.MEDIA.put(`gen/${name}.${ext}`, out.bytes, { httpMetadata: { contentType: out.mime } });
         await logBrainUsage(env, den.slug, "image", 1, out.ticks || estimateTicks("image", 1));
+        if (cap.paid) await settleBurn(env.DB, env, identity.user.id, "image", den.slug, out.ticks || 0, cap.burned);
         text = `/imagine ${prompt}\n🎨 /media/gen/${name}.${ext}`;
         imagined = true;
       }
@@ -587,7 +628,7 @@ export async function handleApi(request, env, url, ctx = null) {
             }
           }
         } else if (searchOn) {
-          const cap = await brainAllowed(env, den.slug, "search");
+          const cap = await brainAllowedOrBurn(env, den.slug, "search", identity.user.id);
           if (cap.allowed) {
             out = await grokSearchChat(cfg, {
               model,
@@ -598,6 +639,10 @@ export async function handleApi(request, env, url, ctx = null) {
             if (out.ok) {
               search = out.toolCalls > 0 ? "used" : "offered";
               await logBrainUsage(env, den.slug, "search", out.toolCalls, out.ticks || estimateTicks("search", out.toolCalls));
+              if (cap.paid) {
+                paidBurn = { kind: "search", burned: cap.burned, balance: cap.balance };
+                await settleBurn(env.DB, env, identity.user.id, "search", den.slug, out.ticks || 0, cap.burned);
+              }
             }
           } else {
             search = cap.reason === "usage_read_failed" ? "closed" : "capped";
@@ -653,7 +698,10 @@ export async function handleApi(request, env, url, ctx = null) {
           `${identity.user.handle}: ${text.slice(0, 300)}`,
         );
       }
-      return json({ ok: true, message: frame, generated, imagined, ...(brain ? { brain } : {}) }, { status: 201 });
+      return json(
+        { ok: true, message: frame, generated, imagined, ...(brain ? { brain } : {}), ...(paidBurn ? { paid: paidBurn } : {}) },
+        { status: 201 },
+      );
     }
   }
 
