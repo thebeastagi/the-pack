@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFakeD1, createFakeDoNamespace, installWebSocketStubs } from "./fakes.js";
+import { createFakeD1, createFakeDoNamespace, createFakeR2, installWebSocketStubs } from "./fakes.js";
 
 installWebSocketStubs();
 const { default: worker } = await import("../src/worker.js");
@@ -10,6 +10,7 @@ function makeEnv(overrides = {}) {
   const env = {
     DB,
     DEN_ROOMS: createFakeDoNamespace({ DB }),
+    MEDIA: createFakeR2(),
     ADMIN_TOKEN: "test-admin-token",
     PACK_VERSION: "test",
     PRIVATE_BETA: "0",
@@ -223,6 +224,21 @@ test("private beta gate: agent-key API calls exempt, humans need Access", async 
   assert.equal(humanApi.status, 403);
 });
 
+test("den art: R2 serving with marker; 404 when object absent", async () => {
+  const env = makeEnv();
+  await worker.fetch(req("/api/admin/seed", { method: "POST", headers: { "x-admin-token": "test-admin-token" } }), env);
+  const bytes = new Uint8Array(2048).fill(9);
+  const missing = await worker.fetch(req("/media/den-lobby"), env);
+  assert.equal(missing.status, 404);
+  await env.MEDIA.put("den-art/lobby.png", bytes, { httpMetadata: { contentType: "image/png" } });
+  const r2 = await worker.fetch(req("/media/den-lobby"), env);
+  assert.equal(r2.status, 200);
+  assert.equal(r2.headers.get("x-pack-art-source"), "r2");
+  assert.equal(r2.headers.get("content-type"), "image/png");
+  const served = new Uint8Array(await r2.arrayBuffer());
+  assert.equal(served.length, bytes.length);
+});
+
 test("den art: admin generate (fake Runway) → media route serves bytes → page shows banner", async () => {
   const png = new Uint8Array(2048).fill(7); // >1KB sanity floor
   const calls = [];
@@ -252,6 +268,8 @@ test("den art: admin generate (fake Runway) → media route serves bytes → pag
     assert.equal(gen.status, 201);
     const genBody = await gen.json();
     assert.equal(genBody.artUrl, "/media/den-lobby");
+    assert.equal(genBody.store, "r2");
+    assert.ok(env.MEDIA._store.has("den-art/lobby.png"), "art bytes in R2");
     assert.ok(calls.some((c) => c.includes("text_to_image")));
 
     const media = await worker.fetch(req("/media/den-lobby"), env);

@@ -5,7 +5,7 @@ import { SQL } from "../src/db.js";
 import { DenRoom } from "../src/den-room.js";
 
 export function createFakeD1() {
-  const t = { users: [], sessions: [], agent_keys: [], dens: [], den_members: [], messages: [], voice_usage: [], voice_flags: [], den_art: [] };
+  const t = { users: [], sessions: [], agent_keys: [], dens: [], den_members: [], messages: [], voice_usage: [], voice_flags: [] };
   const clone = (r) => (r ? structuredClone(r) : r);
   const handlers = {
     [SQL.insertUser]: {
@@ -84,15 +84,6 @@ export function createFakeD1() {
       },
     },
     [SQL.voiceFlagGet]: { first: (a) => clone(t.voice_flags.find((r) => r.k === a[0])) },
-    [SQL.denArtPut]: {
-      run(a) {
-        const row = t.den_art.find((r) => r.den_id === a[0]);
-        const rec = { den_id: a[0], mime: a[1], bytes: a[2], created_at: a[3] };
-        if (row) Object.assign(row, rec);
-        else t.den_art.push(rec);
-      },
-    },
-    [SQL.denArtGet]: { first: (a) => clone(t.den_art.find((r) => r.den_id === a[0])) },
     [SQL.denSetArtUrl]: {
       run(a) {
         const d = t.dens.find((x) => x.id === a[1]);
@@ -186,6 +177,24 @@ export function createFakeDoNamespace(env) {
       if (!rooms.has(key)) rooms.set(key, new DenRoom(new FakeDurableObjectCtx(key), env));
       const room = rooms.get(key);
       return { fetch: (req) => room.fetch(req instanceof Request ? req : new Request(req)), _room: room };
+    },
+  };
+}
+
+export function createFakeR2() {
+  const store = new Map();
+  return {
+    _store: store,
+    async get(key) {
+      const o = store.get(key);
+      if (!o) return null;
+      return { body: o.bytes, httpMetadata: { contentType: o.mime } };
+    },
+    async put(key, bytes, opts) {
+      store.set(key, {
+        bytes: bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes),
+        mime: opts?.httpMetadata?.contentType || "application/octet-stream",
+      });
     },
   };
 }

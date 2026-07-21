@@ -1,7 +1,7 @@
 // the-pack — Worker entry. Pages + REST + per-den WebSocket forwarding.
 import { handleApi } from "./api.js";
 import { accessGateApplies, accessGateOk, resolveIdentity } from "./auth.js";
-import { getDenArt, getDenBySlug } from "./db.js";
+import { getDenBySlug } from "./db.js";
 import { DenRoom } from "./den-room.js";
 import { VoiceDen } from "./voice/voice-den.js";
 import { denPage, homePage, notFoundPage } from "./pages.js";
@@ -129,16 +129,18 @@ export default {
 
       if (request.method !== "GET") return withSecurityHeaders(apiError(405, "method_not_allowed", "Method not allowed."));
 
-      // Den artwork (D1-blob store; R2 not enabled on the account).
+      // Den artwork: served from R2 (phase 2.6; key scheme den-art/{slug}.png).
       const artMatch = path.match(/^\/media\/den-([a-z0-9][a-z0-9-]{1,39})$/);
       if (artMatch) {
-        const den = await getDenBySlug(env.DB, artMatch[1]);
-        const art = den ? await getDenArt(env.DB, den.id) : null;
-        if (!art) return withSecurityHeaders(apiError(404, "not_found", "Not found."));
-        const bytes = art.bytes instanceof Uint8Array ? art.bytes : new Uint8Array(art.bytes);
+        const obj = env.MEDIA ? await env.MEDIA.get(`den-art/${artMatch[1]}.png`).catch(() => null) : null;
+        if (!obj) return withSecurityHeaders(apiError(404, "not_found", "Not found."));
         return withSecurityHeaders(
-          new Response(bytes, {
-            headers: { "content-type": art.mime || "image/png", "cache-control": "public, max-age=3600" },
+          new Response(obj.body, {
+            headers: {
+              "content-type": obj.httpMetadata?.contentType || "image/png",
+              "cache-control": "public, max-age=3600",
+              "x-pack-art-source": "r2",
+            },
           }),
         );
       }

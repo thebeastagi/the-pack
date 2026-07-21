@@ -265,8 +265,10 @@ export async function handleApi(request, env, url) {
       }
       const mime = img.headers.get("content-type")?.split(";")[0] || "image/png";
       const artUrl = `/media/den-${den.slug}`;
-      await db.putDenArt(env.DB, { denId: den.id, mime, bytes, artUrl });
-      return json({ ok: true, slug: den.slug, artUrl, bytes: bytes.length, taskId: submitBody.id }, { status: 201 });
+      // R2 store (phase 2.6); per-den key scheme: den-art/{slug}.png
+      await env.MEDIA.put(`den-art/${den.slug}.png`, bytes, { httpMetadata: { contentType: mime } });
+      await db.markDenArt(env.DB, den.id, artUrl);
+      return json({ ok: true, slug: den.slug, artUrl, bytes: bytes.length, taskId: submitBody.id, store: "r2" }, { status: 201 });
     }
 
     if (path === "/api/admin/seed" && method === "POST") {

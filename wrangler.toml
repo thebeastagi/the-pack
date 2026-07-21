@@ -43,3 +43,7 @@ binding = "DB"
 database_name = "beast-pack-db"
 database_id = "1ae5a0ac-2129-4df3-98bf-e13bf9b106ab"
 migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "the-pack-media"
