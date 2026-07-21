@@ -20,9 +20,11 @@ import * as db from "../db.js";
 import { randomToken } from "../util.js";
 import {
   DAILY_CAP_MINUTES, DEFAULT_XAI_MODEL, DISCLOSURE_TEXT, DOWNLINK_TRACK_NAME, GUARD_TICK_MS, KILLED_TEXT,
-  PACER_FRAME_MS, SFU_RATE, SFU_CHANNELS, SFU_WS_CHUNK_BYTES, WRAP_UP_TEXT, XAI_RATE, XAI_CHANNELS, XAI_REALTIME_URL,
+  PACER_FRAME_MS, PRICE_PER_MIN_USD, SFU_RATE, SFU_CHANNELS, SFU_WS_CHUNK_BYTES, WRAP_UP_TEXT, XAI_RATE, XAI_CHANNELS,
+  XAI_REALTIME_URL,
 } from "./config.js";
 import { CostGuard, DailyCap, GuardStatus, KillReason } from "./costguard.js";
+import { voiceAllowed, voiceSecondsToTicks } from "../caps.js";
 import { recordPackEpisode } from "../episodes.js";
 import { DownlinkPacer } from "./pacer.js";
 import { Chunker, frameBytes, mixMono, monoToStereo, stereoToMono } from "./pcm.js";
@@ -153,10 +155,45 @@ export class VoiceDen {
         await this.teardown(KillReason.MANUAL);
         return json({ error: "kill_switch_active" }, 503);
       }
+      // Wave 2: voice spend lives UNDER the pack's daily USD ceiling (fail
+      // closed — an unreadable ledger never becomes unmetered voice), plus a
+      // per-den minute cap so one hot den cannot eat the global day budget.
+      const usd = await voiceAllowed(this.env);
+      if (!usd.allowed) {
+        await this.teardown(KillReason.DAILY_CAP);
+        return json({ error: usd.reason === "usage_read_failed" ? "usage_ledger_unavailable" : "daily_usd_cap" }, 429);
+      }
+      const denCapS = (Number(this.env.PACK_VOICE_DEN_MIN_CAP) || 10) * 60;
+      const denUsed = await db.getVoiceUsageDen(this.env.DB, cap.key, this.denSlug || "unknown");
+      if (denUsed >= denCapS) {
+        await this.teardown(KillReason.DAILY_CAP);
+        return json({ error: "den_daily_cap_exceeded" }, 429);
+      }
 
       this.state = "connecting";
       this.guard = new CostGuard({ startedAt: this.now() });
       this.adapterToken = randomToken(16);
+
+      // Wave 2: Voice Agent API tools INSIDE the voice session — the Den
+      // Keeper becomes live-aware (web/X) and den-doc-grounded (file_search
+      // over the den's collection). All server-side xAI tools; additive only
+      // (no tools key at all when everything is off/empty). Kill switches:
+      // PACK_VOICE_TOOLS=0 (all), PACK_VOICE_SEARCH_DEFAULT=0 (web/X only).
+      let voiceTools = null;
+      if (this.env.PACK_VOICE_TOOLS !== "0") {
+        const tools = [];
+        if (this.env.PACK_VOICE_SEARCH_DEFAULT !== "0") tools.push({ type: "web_search" }, { type: "x_search" });
+        try {
+          const denRow = await db.getDenBySlug(this.env.DB, this.denSlug);
+          const coll = denRow ? await db.getDenCollection(this.env.DB, denRow.id) : null;
+          if (coll && (await db.countReadyDenDocs(this.env.DB, denRow.id)) > 0) {
+            tools.push({ type: "file_search", vector_store_ids: [coll.collection_id], max_num_results: 5 });
+          }
+        } catch {
+          /* knowledge lookup is best-effort; voice itself never depends on it */
+        }
+        if (tools.length) voiceTools = tools;
+      }
 
       // 1) xAI connect + configure (disclosure is NOT sent here — it would
       // play into the void before any seat's pcListen exists).
@@ -169,7 +206,7 @@ export class VoiceDen {
         /* apiKey goes out of scope — never stored */
       }
       this.wireXai(this.xai);
-      this.xai.send(JSON.stringify(buildSessionUpdate(defaultSessionConfig(denName, denTopic))));
+      this.xai.send(JSON.stringify(buildSessionUpdate(defaultSessionConfig(denName, denTopic, { tools: voiceTools }))));
 
       // 2) Shared downlink ingest adapter (DO -> SFU track "den-voice")
       const host = this.env.HOSTNAME;
@@ -721,6 +758,20 @@ export class VoiceDen {
       closedElapsedS = Math.round(this.guard.elapsedS(this.now()));
       try {
         await db.addVoiceUsage(this.env.DB, cap.key, closedElapsedS);
+      } catch {}
+      // Wave 2: per-den minute ledger + voice spend inside the pack's daily
+      // USD ceiling (kind 'voice'; wall-clock estimate is the documented
+      // UPPER BOUND — exact audio minutes are not exposed per session).
+      try {
+        await db.addVoiceUsageDen(this.env.DB, cap.key, this.denSlug || "unknown", closedElapsedS);
+        await db.addBrainUsage(
+          this.env.DB,
+          cap.key,
+          this.denSlug || "unknown",
+          "voice",
+          0,
+          voiceSecondsToTicks(closedElapsedS, PRICE_PER_MIN_USD),
+        );
       } catch {}
     }
 

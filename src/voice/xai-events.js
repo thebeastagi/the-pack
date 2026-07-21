@@ -2,7 +2,7 @@
 // classification (port from beast-super-app; pure functions, no secrets).
 import { KEYTERMS, REPLACE_MAP, XAI_CHANNELS, XAI_RATE, denInstructions } from "./config.js";
 
-export function defaultSessionConfig(denName, denTopic) {
+export function defaultSessionConfig(denName, denTopic, opts = {}) {
   return {
     voice: "eve",
     instructions: denInstructions(denName, denTopic),
@@ -17,6 +17,10 @@ export function defaultSessionConfig(denName, denTopic) {
     replace: REPLACE_MAP,
     resumption: true,
     idleTimeoutMs: 1_800_000,
+    // Wave 2: Voice Agent API server-side tools (web_search / x_search /
+    // file_search) — executed xAI-side, no client handling required. Null =
+    // no `tools` key on the session update (pre-wave-2 wire shape).
+    ...(Array.isArray(opts.tools) && opts.tools.length ? { tools: opts.tools } : {}),
   };
 }
 

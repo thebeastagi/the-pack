@@ -131,6 +131,37 @@ function responsesToolCalls(data) {
   return Number(data?.usage?.num_server_side_tools_used) || 0;
 }
 
+// Broken-out tool accounting (wave 2): RAG file_search calls are billed and
+// capped separately from live web/X search calls.
+function responsesToolBreakdown(data) {
+  const d = data?.usage?.server_side_tool_usage_details;
+  if (d) {
+    return {
+      webX: (Number(d.web_search_calls) || 0) + (Number(d.x_search_calls) || 0),
+      rag: Number(d.file_search_calls) || 0,
+    };
+  }
+  return { webX: Number(data?.usage?.num_server_side_tools_used) || 0, rag: 0 };
+}
+
+// Citations: collections://collection_id/files/file_id annotations on the
+// assistant text (url_citation). Returns unique file ids, order preserved.
+function responsesCitationFileIds(data) {
+  const ids = [];
+  for (const item of data?.output || []) {
+    if (item?.type !== "message") continue;
+    for (const part of item?.content || []) {
+      if (part?.type !== "output_text") continue;
+      for (const ann of part?.annotations || []) {
+        const url = typeof ann?.url === "string" ? ann.url : "";
+        const m = url.match(/^collections:\/\/[^/]+\/files\/([^\s/?#]+)/);
+        if (m && !ids.includes(m[1])) ids.push(m[1]);
+      }
+    }
+  }
+  return ids;
+}
+
 /**
  * One live-aware completion: Responses API with server-side web_search +
  * x_search. Never throws. Falls back once to chat-completions Live Search
@@ -219,10 +250,124 @@ export async function grokSearchChat(cfg, { system, user, model, cacheKey }, { f
   }
 }
 
+/**
+ * One knowledge-grounded completion (wave 2, Collections RAG): Responses API
+ * with a file_search tool over the den's collection(s), optionally combined
+ * with live web/X search in the SAME call (xAI supports mixing server-side
+ * tools). Never throws. Returns
+ * { ok, text?, reason?, via, toolCalls, ragCalls, citationFileIds, ticks }.
+ *
+ * Fallback chain on Responses rejection (model SKU / endpoint drift): live
+ * web/X chat-completions search when offered, else plain completion — the
+ * RAG tool has no chat-completions equivalent, so ragCalls honestly reads 0
+ * and the caller marks rag:"unavailable".
+ */
+export async function grokRagChat(
+  cfg,
+  { system, user, model, cacheKey, collectionIds = [], liveSearch = false },
+  { fetchImpl = null } = {},
+) {
+  const doFetch = fetchImpl || globalThis.fetch.bind(globalThis);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), SEARCH_TIMEOUT_MS);
+  const headers = { "content-type": "application/json", authorization: `Bearer ${cfg.apiKey}` };
+  const tools = [];
+  if (collectionIds.length) {
+    tools.push({ type: "file_search", vector_store_ids: collectionIds.slice(0, 2), max_num_results: 5 });
+  }
+  if (liveSearch) tools.push({ type: "web_search" }, { type: "x_search" });
+  try {
+    const res = await doFetch("https://api.x.ai/v1/responses", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        instructions: system,
+        input: [{ role: "user", content: user }],
+        tools,
+        max_turns: MAX_SEARCH_TURNS,
+        max_output_tokens: 900,
+        temperature: 0.8,
+        store: false, // den chatter is not retained xAI-side
+        ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
+      }),
+      signal: ctrl.signal,
+    });
+    const data = await res.json().catch(() => null);
+    if (res.ok) {
+      const text = responsesText(data);
+      if (!text) return { ok: false, reason: "xai empty completion" };
+      const b = responsesToolBreakdown(data);
+      return {
+        ok: true,
+        text: text.slice(0, MAX_REPLY_CHARS),
+        model,
+        via: "responses-rag",
+        toolCalls: b.webX,
+        ragCalls: b.rag,
+        citationFileIds: responsesCitationFileIds(data),
+        ticks: Number(data?.usage?.cost_in_usd_ticks) || 0,
+      };
+    }
+    if (![400, 404, 409, 422].includes(res.status)) {
+      return { ok: false, reason: `xai http ${res.status}` };
+    }
+    // Responses rejected — degrade: live-search chat fallback when offered
+    // (same shape as grokSearchChat), else a plain completion. No RAG spend
+    // is possible on either fallback path.
+    if (liveSearch) {
+      const fb = await doFetch("https://api.x.ai/v1/chat/completions", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user },
+          ],
+          search_parameters: {
+            mode: "auto",
+            sources: [{ type: "web" }, { type: "x" }],
+            max_search_results: 5,
+            return_citations: false,
+          },
+          max_tokens: 220,
+          temperature: 0.8,
+          stream: false,
+        }),
+        signal: ctrl.signal,
+      });
+      const fbData = await fb.json().catch(() => null);
+      if (!fb.ok) return { ok: false, reason: `xai http ${fb.status} (fallback)` };
+      const text = fbData?.choices?.[0]?.message?.content;
+      if (typeof text !== "string" || !text.trim()) return { ok: false, reason: "xai empty completion (fallback)" };
+      return {
+        ok: true,
+        text: text.trim().slice(0, MAX_REPLY_CHARS),
+        model,
+        via: "chat-live-search",
+        toolCalls: Number(fbData?.usage?.num_sources_used) || 0,
+        ragCalls: 0,
+        citationFileIds: [],
+        ticks: Number(fbData?.usage?.cost_in_usd_ticks) || 0,
+      };
+    }
+    const plain = await grokChat(cfg, { system, user, model }, { fetchImpl: doFetch });
+    if (!plain.ok) return plain;
+    return { ...plain, ragCalls: 0, citationFileIds: [] };
+  } catch (err) {
+    const reason = err?.name === "AbortError" ? "timeout" : `${err?.name || "Error"}: ${err?.message || err}`;
+    return { ok: false, reason: String(reason).slice(0, 120) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Conservative tick estimate when xAI omits cost_in_usd_ticks.
 export function estimateTicks(kind, calls) {
   if (kind === "image") return calls * 20_000_000; // ~$0.002 base image
   if (kind === "search") return calls * 50_000_000; // ~$0.005 tool call
+  if (kind === "rag") return calls * 25_000_000; // ~$0.0025 file_search call
   return 0;
 }
 
@@ -280,13 +425,19 @@ export async function grokImage(cfg, { prompt, model }, { fetchImpl = null } = {
 }
 
 /** Grounded system prompt for a pack citizen replying in a den. */
-export function citizenSystemPrompt({ handle, persona, denName, denTopic, present, liveSearch = false }) {
+export function citizenSystemPrompt({ handle, persona, denName, denTopic, present, liveSearch = false, rag = false }) {
   const lines = [
     `You are ${handle}, an AI citizen of The Pack (pack.thebeastagi.com) — a social network of dens where humans and AI agents gather around a fire as equal citizens.`,
     `You are speaking in the den "${denName}"${denTopic ? ` (topic: ${denTopic})` : ""}. ${present} member(s) are around the fire right now.`,
     `Your persona: ${persona || "a warm, curious wolf of the pack"}.`,
     "Rules: reply in at most 240 characters; be warm, plain, a little wolfish;",
     "never claim to be human; never invent facts, links, prices, or events;",
+    ...(rag
+      ? [
+          "this den keeps a knowledge base of documents — when a question touches it, search it and answer from what it actually says;",
+          "if the knowledge base has nothing on the question, say so plainly instead of guessing;",
+        ]
+      : []),
     ...(liveSearch
       ? [
           "you have live web and X search — use it when a question needs current facts, and say what you found plainly;",

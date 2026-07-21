@@ -50,6 +50,21 @@ export const SQL = {
   brainUsageAdd:
     "INSERT INTO brain_usage (day, den, kind, calls, ticks) VALUES (?, ?, ?, ?, ?) ON CONFLICT(day, den, kind) DO UPDATE SET calls = calls + excluded.calls, ticks = ticks + excluded.ticks",
   brainUsageDay: "SELECT den, kind, calls, ticks FROM brain_usage WHERE day = ? ORDER BY den, kind",
+
+  // ── wave 2 (migration 0007): den knowledge bases + per-den voice caps ────
+  denCollectionGet: "SELECT * FROM den_collections WHERE den_id = ?",
+  denCollectionInsert: "INSERT INTO den_collections (den_id, collection_id, created_at) VALUES (?, ?, ?)",
+  denDocInsert:
+    "INSERT INTO den_docs (id, den_id, file_id, name, bytes, status, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  denDocsByDen: "SELECT * FROM den_docs WHERE den_id = ? ORDER BY created_at ASC LIMIT 100",
+  denDocById: "SELECT * FROM den_docs WHERE id = ? AND den_id = ?",
+  denDocSetStatus: "UPDATE den_docs SET status = ? WHERE id = ?",
+  denDocDelete: "DELETE FROM den_docs WHERE id = ?",
+  denDocsCount: "SELECT COUNT(*) AS n FROM den_docs WHERE den_id = ?",
+  denDocsReadyCount: "SELECT COUNT(*) AS n FROM den_docs WHERE den_id = ? AND status = 'ready'",
+  voiceUsageDenGet: "SELECT seconds FROM voice_usage_den WHERE day = ? AND den = ?",
+  voiceUsageDenAdd:
+    "INSERT INTO voice_usage_den (day, den, seconds) VALUES (?, ?, ?) ON CONFLICT(day, den) DO UPDATE SET seconds = seconds + excluded.seconds",
 };
 
 export async function createUser(db, { handle, displayName = "", email = null, kind = "human" }) {
@@ -214,6 +229,71 @@ export async function getVoiceFlag(db, k) {
 
 export async function setVoiceFlag(db, k, on) {
   await db.prepare(SQL.voiceFlagSet).bind(k, on ? "1" : "0").run();
+}
+
+// ── wave 2: den knowledge bases (xAI Collections RAG) ─────────────────────
+export async function getDenCollection(db, denId) {
+  return db.prepare(SQL.denCollectionGet).bind(denId).first();
+}
+
+export async function createDenCollection(db, { denId, collectionId }) {
+  await db.prepare(SQL.denCollectionInsert).bind(denId, collectionId, nowIso()).run();
+  return { den_id: denId, collection_id: collectionId };
+}
+
+export async function createDenDoc(db, { denId, fileId, name, bytes, addedBy }) {
+  const doc = {
+    id: uuid(),
+    den_id: denId,
+    file_id: fileId,
+    name,
+    bytes,
+    status: "processing",
+    added_by: addedBy,
+    created_at: nowIso(),
+  };
+  await db
+    .prepare(SQL.denDocInsert)
+    .bind(doc.id, doc.den_id, doc.file_id, doc.name, doc.bytes, doc.status, doc.added_by, doc.created_at)
+    .run();
+  return doc;
+}
+
+export async function listDenDocs(db, denId) {
+  const res = await db.prepare(SQL.denDocsByDen).bind(denId).all();
+  return res.results || [];
+}
+
+export async function getDenDoc(db, denId, docId) {
+  return db.prepare(SQL.denDocById).bind(docId, denId).first();
+}
+
+export async function setDenDocStatus(db, docId, status) {
+  await db.prepare(SQL.denDocSetStatus).bind(status, docId).run();
+}
+
+export async function deleteDenDoc(db, docId) {
+  await db.prepare(SQL.denDocDelete).bind(docId).run();
+}
+
+export async function countDenDocs(db, denId) {
+  const row = await db.prepare(SQL.denDocsCount).bind(denId).first();
+  return row ? Number(row.n) || 0 : 0;
+}
+
+export async function countReadyDenDocs(db, denId) {
+  const row = await db.prepare(SQL.denDocsReadyCount).bind(denId).first();
+  return row ? Number(row.n) || 0 : 0;
+}
+
+// ── wave 2: per-den voice minute ledger (global rollup stays voice_usage) ──
+export async function getVoiceUsageDen(db, day, den) {
+  const row = await db.prepare(SQL.voiceUsageDenGet).bind(day, den).first();
+  return row ? Number(row.seconds) || 0 : 0;
+}
+
+export async function addVoiceUsageDen(db, day, den, seconds) {
+  await db.prepare(SQL.voiceUsageDenAdd).bind(day, den, Math.max(0, Math.round(seconds))).run();
 }
 
 export function publicUser(u) {

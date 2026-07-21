@@ -13,11 +13,21 @@ import {
   grokChat,
   grokConfigFromEnv,
   grokImage,
+  grokRagChat,
   grokSearchChat,
   imageModelFromEnv,
   isBrainTier,
 } from "./grok.js";
 import { brainAllowed, brainCapsFromEnv, logBrainUsage, todayKey } from "./caps.js";
+import {
+  addDocument,
+  collectionsConfigFromEnv,
+  createCollection,
+  docStatusFromXai,
+  listDocuments,
+  removeDocument,
+  uploadTextFile,
+} from "./collections.js";
 import { agentverseClient, renderCitizenAgent } from "./onboarding.js";
 import {
   apiError, clampStr, clientIp, isHandle, isSlug, json, randomToken, safeEqualHex, sha256Hex, softRateLimit,
@@ -69,6 +79,8 @@ export async function handleApi(request, env, url, ctx = null) {
         grok_brain: Boolean(grokConfigFromEnv(env)),
         live_search: Boolean(grokConfigFromEnv(env)) && env.PACK_SEARCH_DEFAULT !== "0",
         imagine: Boolean(grokConfigFromEnv(env)),
+        collections_rag: Boolean(grokConfigFromEnv(env)) && env.PACK_RAG_DEFAULT !== "0",
+        voice_agent_tools: env.PACK_VOICE_TOOLS !== "0",
         brain_tiers: Object.keys(BRAIN_TIERS),
         self_serve_agents: true,
         hosted_agents: env.DEN_KEEPER_AGENT_ADDRESS
@@ -294,11 +306,102 @@ export async function handleApi(request, env, url, ctx = null) {
     return json({ ok: true, den: db.publicDen(den, { present: 0, members: 1 }) }, { status: 201 });
   }
 
-  const denMatch = path.match(/^\/api\/dens\/([a-z0-9][a-z0-9-]{1,39})(?:\/(join|messages|presence|memory))?$/);
+  const denMatch = path.match(/^\/api\/dens\/([a-z0-9][a-z0-9-]{1,39})(?:\/(join|messages|presence|memory|docs))?$/);
   if (denMatch) {
     const [, slug, sub] = denMatch;
     const den = await db.getDenBySlug(env.DB, slug);
     if (!den) return apiError(404, "den_not_found", "No den with that slug.");
+
+    // ── den knowledge base (wave 2, Collections RAG) ──────────────────────
+    // Any citizen (human session or agent key) can add text docs to a den's
+    // xAI collection; the den brain searches them via the file_search tool
+    // and cites them (collections:// → doc name). Doc ADDS are unpaid
+    // (indexing rides xAI storage, capped by count/size/rate limits); the
+    // paid surface is SEARCH, pre-flighted under kind 'rag' in the brain
+    // path below. Fail-closed everywhere a paid call could happen.
+    if (sub === "docs" && method === "GET") {
+      const docs = await db.listDenDocs(env.DB, den.id);
+      // Lazy status sync: xAI indexing is async; refresh rows still marked
+      // processing (best-effort — a failed sync never breaks the listing).
+      const coll = await db.getDenCollection(env.DB, den.id);
+      const cfg = collectionsConfigFromEnv(env);
+      if (coll && cfg && docs.some((d) => d.status === "processing")) {
+        const remote = await listDocuments(cfg, coll.collection_id);
+        if (remote.ok) {
+          const byFile = new Map(remote.documents.map((r) => [r?.file_metadata?.file_id, r]));
+          for (const d of docs) {
+            if (d.status !== "processing") continue;
+            const row = byFile.get(d.file_id);
+            if (!row) continue;
+            const next = docStatusFromXai(row);
+            if (next !== d.status) {
+              d.status = next;
+              try { await db.setDenDocStatus(env.DB, d.id, next); } catch {}
+            }
+          }
+        }
+      }
+      return json({
+        ok: true,
+        slug: den.slug,
+        knowledgeBase: Boolean(coll),
+        docs: docs.map((d) => ({
+          id: d.id,
+          name: d.name,
+          bytes: d.bytes,
+          status: d.status,
+          createdAt: d.created_at,
+        })),
+      });
+    }
+
+    if (sub === "docs" && method === "POST") {
+      const identity = await resolveIdentity(request, env);
+      if (!identity) return apiError(401, "unauthorized", "Authenticate (session or agent key) to add knowledge.");
+      if (!softRateLimit(`docs:${identity.user.id}`, 10, 3600_000)) {
+        return apiError(429, "rate_limited", "Knowledge needs time to settle (10 docs/hour). Try later.");
+      }
+      const cfg = collectionsConfigFromEnv(env);
+      if (!cfg) return apiError(503, "rag_not_configured", "Knowledge bases are not configured on this worker.");
+      const body = await readBody(request);
+      if (!body) return apiError(400, "bad_json", "Expected a JSON body.");
+      const name = clampStr(body.name, 80).replace(/[^\w .()-]/g, "").trim();
+      const content = clampStr(body.content, 20_000).trim();
+      if (!name || name.length < 2) return apiError(400, "bad_name", "Doc name required (2–80 chars).");
+      if (content.length < 20) return apiError(400, "doc_too_short", "Doc content must be at least 20 characters.");
+      const maxDocs = Number(env.PACK_DEN_DOCS_CAP) || 20;
+      if ((await db.countDenDocs(env.DB, den.id)) >= maxDocs) {
+        return apiError(429, "docs_cap", `This den's knowledge base is full (${maxDocs} docs). Remove one first.`);
+      }
+      // Get-or-create the den's xAI collection (lazy: first doc creates it).
+      let coll = await db.getDenCollection(env.DB, den.id);
+      if (!coll) {
+        const created = await createCollection(cfg, `pack-den-${den.slug}`.slice(0, 60));
+        if (!created.ok) {
+          return apiError(502, "collection_failed", `Could not create the den's knowledge base (${created.reason}).`);
+        }
+        coll = await db.createDenCollection(env.DB, { denId: den.id, collectionId: created.collectionId });
+      }
+      const up = await uploadTextFile(cfg, `${name}.txt`, content);
+      if (!up.ok) return apiError(502, "upload_failed", `Could not upload the doc (${up.reason}). Nothing was added.`);
+      const added = await addDocument(cfg, coll.collection_id, up.fileId);
+      if (!added.ok) {
+        return apiError(502, "index_failed", `Could not index the doc (${added.reason}). Nothing was added.`);
+      }
+      const doc = await db.createDenDoc(env.DB, {
+        denId: den.id,
+        fileId: up.fileId,
+        name,
+        bytes: new TextEncoder().encode(content).length,
+        addedBy: identity.user.id,
+      });
+      recordPackEpisode(env, ctx, "den_doc_added", den.slug, `${identity.user.handle} added knowledge doc "${name}" (${doc.bytes}B)`);
+      return json({ ok: true, doc: { id: doc.id, name: doc.name, bytes: doc.bytes, status: doc.status } }, { status: 201 });
+    }
+
+    if (sub === "docs" && method === "DELETE") {
+      return apiError(405, "method_not_allowed", "Delete a specific doc via /api/dens/{slug}/docs/{id}.");
+    }
 
     if (!sub && method === "GET") {
       const [presence, members] = await Promise.all([livePresence(env, den), db.getMemberCount(env.DB, den.id)]);
@@ -426,6 +529,12 @@ export async function handleApi(request, env, url, ctx = null) {
         const tier = isBrainTier(db.denBrainTier(den)) ? db.denBrainTier(den) : "standard";
         const model = brainModelForTier(env, tier);
         const searchOn = db.denSearchTools(den) && env.PACK_SEARCH_DEFAULT !== "0";
+        // Wave 2: den knowledge base (Collections RAG). Active only when the
+        // den has ≥1 ready doc; the paid surface (file_search) is pre-flighted
+        // under kind 'rag' with the same fail-closed semantics as 'search'.
+        const collRow = await db.getDenCollection(env.DB, den.id);
+        const ragOn =
+          Boolean(collRow) && env.PACK_RAG_DEFAULT !== "0" && (await db.countReadyDenDocs(env.DB, den.id)) > 0;
         const prompt = {
           persona: clampStr(body.persona, 300),
           denName: den.name,
@@ -433,8 +542,51 @@ export async function handleApi(request, env, url, ctx = null) {
           present: presence.present,
         };
         let search = "off";
+        let rag = "off";
+        let citations = [];
         let out = null;
-        if (searchOn) {
+        let ragCap = null;
+        if (ragOn) {
+          ragCap = await brainAllowed(env, den.slug, "rag");
+          if (!ragCap.allowed) rag = ragCap.reason === "usage_read_failed" ? "closed" : "capped";
+        }
+        const useRag = ragOn && ragCap?.allowed;
+        if (useRag) {
+          // RAG call: file_search over the den's collection, with live web/X
+          // tools in the SAME Responses call when the den also has search on
+          // (one call, one bill — xAI supports mixed server-side tools).
+          const searchCap = searchOn ? await brainAllowed(env, den.slug, "search") : null;
+          const useSearch = Boolean(searchCap?.allowed);
+          if (searchOn && !useSearch) search = searchCap.reason === "usage_read_failed" ? "closed" : "capped";
+          out = await grokRagChat(cfg, {
+            model,
+            cacheKey: `pack-den-${den.slug}`,
+            system: citizenSystemPrompt({ handle: identity.user.handle, ...prompt, liveSearch: useSearch, rag: true }),
+            user: text.slice(0, 1500),
+            collectionIds: [collRow.collection_id],
+            liveSearch: useSearch,
+          });
+          if (out.ok) {
+            rag = out.via === "responses-rag" ? (out.ragCalls > 0 ? "used" : "offered") : "unavailable";
+            if (useSearch) search = out.toolCalls > 0 ? "used" : "offered";
+            // Accounting: file_search calls + FULL ticks under 'rag'; web/X
+            // call counts under 'search' with 0 ticks (no double-count — the
+            // USD ceiling sums ticks across kinds).
+            await logBrainUsage(env, den.slug, "rag", out.ragCalls, out.ticks || estimateTicks("rag", out.ragCalls));
+            if (out.toolCalls > 0) await logBrainUsage(env, den.slug, "search", out.toolCalls, 0);
+            // Citations: map collections:// file ids back to doc names.
+            if (out.citationFileIds?.length) {
+              const docs = await db.listDenDocs(env.DB, den.id);
+              citations = [
+                ...new Set(
+                  out.citationFileIds
+                    .map((fid) => docs.find((d) => d.file_id === fid)?.name)
+                    .filter(Boolean),
+                ),
+              ].slice(0, 4);
+            }
+          }
+        } else if (searchOn) {
           const cap = await brainAllowed(env, den.slug, "search");
           if (cap.allowed) {
             out = await grokSearchChat(cfg, {
@@ -469,8 +621,14 @@ export async function handleApi(request, env, url, ctx = null) {
           await logBrainUsage(env, den.slug, "chat", 0, out.ticks || 0);
         }
         text = out.text;
+        if (citations.length) {
+          // Source line rides inside the stored body (same pattern as
+          // /imagine's /media/gen reference) so history + live broadcast +
+          // memory episodes all carry it with zero page changes.
+          text = `${text}\n📚 ${citations.join(", ")}`.slice(0, 640);
+        }
         generated = true;
-        brain = { tier, model, search };
+        brain = { tier, model, search, ...(ragOn ? { rag } : {}) };
       }
 
       const msg = await db.createMessage(env.DB, { denId: den.id, userId: identity.user.id, body: text });
@@ -497,6 +655,30 @@ export async function handleApi(request, env, url, ctx = null) {
       }
       return json({ ok: true, message: frame, generated, imagined, ...(brain ? { brain } : {}) }, { status: 201 });
     }
+  }
+
+  // ── den knowledge base: delete one doc (adder, or admin token) ──────────
+  const docMatch = path.match(/^\/api\/dens\/([a-z0-9][a-z0-9-]{1,39})\/docs\/([A-Za-z0-9-]{8,64})$/);
+  if (docMatch && method === "DELETE") {
+    const [, slug, docId] = docMatch;
+    const den = await db.getDenBySlug(env.DB, slug);
+    if (!den) return apiError(404, "den_not_found", "No den with that slug.");
+    const identity = await resolveIdentity(request, env);
+    const doc = await db.getDenDoc(env.DB, den.id, docId);
+    if (!doc) return apiError(404, "doc_not_found", "No doc with that id in this den.");
+    const admin = env.ADMIN_TOKEN || "";
+    const isAdmin =
+      admin && safeEqualHex(await sha256Hex(request.headers.get("x-admin-token") || ""), await sha256Hex(admin));
+    if (!isAdmin && (!identity || identity.user.id !== doc.added_by)) {
+      return apiError(403, "not_your_doc", "Only the citizen who added a doc (or an admin) can remove it.");
+    }
+    // Best-effort xAI-side removal; the D1 row goes regardless so a dead
+    // remote can never strand the den's knowledge base.
+    const cfg = collectionsConfigFromEnv(env);
+    const coll = await db.getDenCollection(env.DB, den.id);
+    if (cfg && coll) await removeDocument(cfg, coll.collection_id, doc.file_id);
+    await db.deleteDenDoc(env.DB, doc.id);
+    return json({ ok: true, deleted: doc.id });
   }
 
   // ── admin (single secret; disabled when unset) ──────────────────────────
