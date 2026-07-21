@@ -220,6 +220,55 @@ export async function handleApi(request, env, url) {
       return json({ ok: true, kill: Boolean(body.on) });
     }
 
+    if (path === "/api/admin/den-art" && method === "POST") {
+      const body = await readBody(request);
+      if (!body) return apiError(400, "bad_json", "Expected a JSON body.");
+      const slug = clampStr(body.slug, 40).toLowerCase();
+      const den = await db.getDenBySlug(env.DB, slug);
+      if (!den) return apiError(404, "den_not_found", "No den with that slug.");
+      if (!env.RUNWAY_API_KEY) return apiError(503, "runway_not_configured", "Runway key not set on this worker.");
+
+      const prompt = clampStr(body.prompt, 900) ||
+        `Neon-noir campfire scene for a social voice room called "${den.name}": a glowing warm orange fire orb at the center of a dark obsidian-blue void, faint violet-to-cyan holographic rings and seats arranged around the fire, subtle particles, cinematic, moody, high detail, no text, no watermark. Style: polished obsidian, deep blue-black #0a0a13 background, accents #7c6ff7 violet and #4fe0d8 cyan, fire #ff8a3c orange.`;
+
+      // Runway text_to_image (task API): submit -> poll -> download.
+      const submit = await fetch("https://api.dev.runwayml.com/v1/text_to_image", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.RUNWAY_API_KEY}`,
+          "X-Runway-Version": "2024-11-06",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: "gen4_image", promptText: prompt, ratio: "1360:768" }),
+      });
+      const submitBody = await submit.json().catch(() => ({}));
+      if (!submit.ok || !submitBody.id) {
+        return apiError(502, "runway_submit_failed", `Runway submit failed (${submit.status}).`);
+      }
+      let imageUrl = null;
+      for (let i = 0; i < 12 && !imageUrl; i++) {
+        await new Promise((r) => setTimeout(r, 5000));
+        const task = await fetch(`https://api.dev.runwayml.com/v1/tasks/${submitBody.id}`, {
+          headers: { Authorization: `Bearer ${env.RUNWAY_API_KEY}`, "X-Runway-Version": "2024-11-06" },
+        });
+        const taskBody = await task.json().catch(() => ({}));
+        if (taskBody.status === "SUCCEEDED") imageUrl = taskBody.output?.[0] ?? null;
+        if (taskBody.status === "FAILED") break;
+      }
+      if (!imageUrl) return apiError(502, "runway_task_failed", "Runway task did not produce an image in time.");
+
+      const img = await fetch(imageUrl);
+      if (!img.ok) return apiError(502, "runway_download_failed", "Could not download the generated image.");
+      const bytes = new Uint8Array(await img.arrayBuffer());
+      if (bytes.length < 1000 || bytes.length > 4 * 1024 * 1024) {
+        return apiError(502, "runway_bad_image", "Generated image failed size sanity checks.");
+      }
+      const mime = img.headers.get("content-type")?.split(";")[0] || "image/png";
+      const artUrl = `/media/den-${den.slug}`;
+      await db.putDenArt(env.DB, { denId: den.id, mime, bytes, artUrl });
+      return json({ ok: true, slug: den.slug, artUrl, bytes: bytes.length, taskId: submitBody.id }, { status: 201 });
+    }
+
     if (path === "/api/admin/seed" && method === "POST") {
       const out = { lobby: "exists", denKeeper: "exists", key: null };
       let keeper = await db.getUserByHandle(env.DB, "den-keeper");

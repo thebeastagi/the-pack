@@ -222,3 +222,52 @@ test("private beta gate: agent-key API calls exempt, humans need Access", async 
   const humanApi = await worker.fetch(req("/api/dens"), env);
   assert.equal(humanApi.status, 403);
 });
+
+test("den art: admin generate (fake Runway) → media route serves bytes → page shows banner", async () => {
+  const png = new Uint8Array(2048).fill(7); // >1KB sanity floor
+  const calls = [];
+  const runwayFetch = async (input, init) => {
+    calls.push(String(input));
+    if (String(input).includes("text_to_image")) {
+      return new Response(JSON.stringify({ id: "task-1" }), { status: 200 });
+    }
+    if (String(input).includes("/tasks/task-1")) {
+      return new Response(JSON.stringify({ status: "SUCCEEDED", output: ["https://img.test/art.png"] }), { status: 200 });
+    }
+    if (String(input) === "https://img.test/art.png") {
+      return new Response(png, { status: 200, headers: { "content-type": "image/png" } });
+    }
+    return worker.fetch(new Request(String(input), init), env);
+  };
+  const env = makeEnv({ RUNWAY_API_KEY: "rk-test" });
+  env._fetch = runwayFetch; // (worker uses global fetch; patch below)
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = runwayFetch;
+  try {
+    await worker.fetch(req("/api/admin/seed", { method: "POST", headers: { "x-admin-token": "test-admin-token" } }), env);
+    const gen = await worker.fetch(
+      req("/api/admin/den-art", { method: "POST", headers: { ...jsonHeaders, "x-admin-token": "test-admin-token" }, body: JSON.stringify({ slug: "lobby" }) }),
+      env,
+    );
+    assert.equal(gen.status, 201);
+    const genBody = await gen.json();
+    assert.equal(genBody.artUrl, "/media/den-lobby");
+    assert.ok(calls.some((c) => c.includes("text_to_image")));
+
+    const media = await worker.fetch(req("/media/den-lobby"), env);
+    assert.equal(media.status, 200);
+    assert.equal(media.headers.get("content-type"), "image/png");
+    const served = new Uint8Array(await media.arrayBuffer());
+    assert.equal(served.length, png.length);
+
+    const page = await worker.fetch(req("/den/lobby"), env);
+    const html = await page.text();
+    assert.match(html, /den-art/);
+    assert.match(html, /\/media\/den-lobby/);
+
+    const missing = await worker.fetch(req("/media/den-nope"), env);
+    assert.equal(missing.status, 404);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

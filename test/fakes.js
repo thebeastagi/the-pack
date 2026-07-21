@@ -5,7 +5,7 @@ import { SQL } from "../src/db.js";
 import { DenRoom } from "../src/den-room.js";
 
 export function createFakeD1() {
-  const t = { users: [], sessions: [], agent_keys: [], dens: [], den_members: [], messages: [], voice_usage: [], voice_flags: [] };
+  const t = { users: [], sessions: [], agent_keys: [], dens: [], den_members: [], messages: [], voice_usage: [], voice_flags: [], den_art: [] };
   const clone = (r) => (r ? structuredClone(r) : r);
   const handlers = {
     [SQL.insertUser]: {
@@ -84,6 +84,21 @@ export function createFakeD1() {
       },
     },
     [SQL.voiceFlagGet]: { first: (a) => clone(t.voice_flags.find((r) => r.k === a[0])) },
+    [SQL.denArtPut]: {
+      run(a) {
+        const row = t.den_art.find((r) => r.den_id === a[0]);
+        const rec = { den_id: a[0], mime: a[1], bytes: a[2], created_at: a[3] };
+        if (row) Object.assign(row, rec);
+        else t.den_art.push(rec);
+      },
+    },
+    [SQL.denArtGet]: { first: (a) => clone(t.den_art.find((r) => r.den_id === a[0])) },
+    [SQL.denSetArtUrl]: {
+      run(a) {
+        const d = t.dens.find((x) => x.id === a[1]);
+        if (d) d.art_url = a[0];
+      },
+    },
     [SQL.voiceFlagSet]: {
       run(a) {
         const row = t.voice_flags.find((r) => r.k === a[0]);

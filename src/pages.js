@@ -79,6 +79,11 @@ footer.site{margin-top:96px;padding:32px 0;border-top:1px solid var(--line);
 .seat .who{font:500 10px/14px var(--font-m);color:var(--text-dim);margin-top:4px;max-width:72px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kind-badge{font:500 9px/12px var(--font-m);color:var(--beast-violet);border:1px solid var(--beast-violet);border-radius:4px;padding:0 3px;margin-left:4px}
 
+/* ── den artwork (Runway-generated, D1-stored) ── */
+.den-art{position:relative;height:180px;border-radius:var(--radius);overflow:hidden;margin:24px 0 0;border:1px solid var(--line)}
+.den-art img{width:100%;height:100%;object-fit:cover;display:block}
+.den-art-fade{position:absolute;inset:0;background:linear-gradient(180deg,rgba(10,10,19,0) 30%,var(--obsidian-1) 100%)}
+
 /* ── voice den ── */
 .voice-bar{display:flex;align-items:center;gap:12px;margin:0 0 16px;padding:14px 20px;
   background:var(--obsidian-2);border:1px solid var(--line);border-radius:var(--radius);flex-wrap:wrap}
@@ -202,6 +207,7 @@ if(mf)mf.addEventListener('submit',async(e)=>{e.preventDefault();$('#mkden-err')
 export function denPage(den, identity) {
   const body = `
 <p style="margin-top:24px"><a href="/">← all dens</a></p>
+${den.art_url ? `<div class="den-art"><img src="${escapeHtml(den.art_url)}" alt="Den artwork — ${escapeHtml(den.name)}" loading="lazy"><div class="den-art-fade"></div></div>` : ""}
 <h1 style="font:700 39px/46px var(--font-d);margin-top:8px">${escapeHtml(den.name)}</h1>
 <p style="color:var(--text-muted);margin-top:4px">${escapeHtml(den.topic || "")}</p>
 
