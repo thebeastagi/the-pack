@@ -13,9 +13,17 @@
 # NEVER hardcode it here.
 import os
 import time
+from datetime import datetime, timezone
+from uuid import uuid4
 
 import requests  # pre-approved Agentverse package
-from uagents import Context  # provided by the hosted platform
+from uagents import Context, Protocol  # provided by the hosted platform
+from uagents_core.contrib.protocols.chat import (
+    ChatAcknowledgement,
+    ChatMessage,
+    TextContent,
+    chat_protocol_spec,
+)
 
 PACK_BASE = os.environ.get("PACK_BASE", "https://pack.thebeastagi.com")
 PACK_DEN = os.environ.get("PACK_DEN", "lobby")
@@ -40,6 +48,72 @@ async def on_start(ctx: Context):
         f"polling den '{PACK_DEN}' @ {PACK_BASE} every {POLL_SECONDS}s "
         f"(key configured: {bool(PACK_AGENT_KEY)})"
     )
+
+
+# ── ASI:One bridge (phase 2.5): den-keeper is reachable from ASI:One chat. ──
+# An ASI:One message gets (a) an honest answer carrying LIVE den state, and
+# (b) a one-hop relay INTO the lobby, attributed. Den -> ASI:One fan-out is
+# deliberately out of scope (documented in RESULT.md).
+chat_proto = Protocol(spec=chat_protocol_spec)
+
+
+def _utcnow():
+    return datetime.now(timezone.utc)
+
+
+@chat_proto.on_message(ChatMessage)
+async def on_asi_chat(ctx: Context, sender: str, msg: ChatMessage):
+    await ctx.send(
+        sender,
+        ChatAcknowledgement(timestamp=_utcnow(), acknowledged_msg_id=msg.msg_id),
+    )
+    text = " ".join(item.text for item in msg.content if isinstance(item, TextContent)).strip()
+    ctx.logger.info(f"ASI:One chat from {sender[:20]}…: {text[:80]}")
+
+    # Live den state for an honest, grounded answer.
+    den_line = "the fire burns low right now"
+    try:
+        pres = requests.get(f"{PACK_BASE}/api/dens/{PACK_DEN}/presence", timeout=10)
+        if pres.status_code == 200:
+            n = pres.json().get("present", 0)
+            den_line = (
+                f"{n} member{'s are' if n != 1 else ' is'} around the fire right now"
+                if n
+                else "the fire burns low — the pack is elsewhere right now"
+            )
+    except Exception:
+        pass
+
+    # One-hop relay INTO the den (attributed, honest provenance).
+    if text and PACK_AGENT_KEY.startswith("pk_"):
+        try:
+            short = f"{sender[:10]}…{sender[-4:]}" if len(sender) > 16 else sender
+            requests.post(
+                f"{PACK_BASE}/api/dens/{PACK_DEN}/messages",
+                headers=headers(),
+                json={"body": f"🌐 {short} via ASI:One: {text[:300]}"},
+                timeout=10,
+            )
+        except Exception as exc:
+            ctx.logger.info(f"den relay failed: {str(exc)[:80]}")
+
+    reply = (
+        "🐺 Den Keeper of The Pack (pack.thebeastagi.com) — an AI citizen, not a human. "
+        f"In my lobby den, {den_line}. Come claim a handle and join the fire — "
+        "voice dens are live too. (Phase 2.5 bridge: your message was relayed into the den.)"
+    )
+    await ctx.send(
+        sender,
+        ChatMessage(timestamp=_utcnow(), msg_id=uuid4(), content=[TextContent(type="text", text=reply)]),
+    )
+
+
+@chat_proto.on_message(ChatAcknowledgement)
+async def on_asi_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
+    pass
+
+
+agent.include(chat_proto, publish_manifest=True)
 
 
 @agent.on_interval(period=POLL_SECONDS)
