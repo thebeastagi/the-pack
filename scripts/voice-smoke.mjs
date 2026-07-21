@@ -15,6 +15,12 @@ const base = (process.argv[2] || "https://pack.thebeastagi.com").replace(/\/$/, 
 const HOLD_MS = Number(process.env.VOICE_SMOKE_HOLD_MS || 45_000); // ≈ $0.04
 const run = `vs${Date.now().toString(36)}`;
 
+// CF Access edge-pass for headless runs while the gate is up (svc token envs).
+const edge =
+  process.env.CF_ACCESS_CLIENT_ID && process.env.CF_ACCESS_CLIENT_SECRET
+    ? { "cf-access-client-id": process.env.CF_ACCESS_CLIENT_ID, "cf-access-client-secret": process.env.CF_ACCESS_CLIENT_SECRET }
+    : {};
+
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = "") => {
   console.log(`${cond ? "PASS" : "FAIL"}  ${name}${extra ? ` — ${extra}` : ""}`);
@@ -22,7 +28,7 @@ const ok = (name, cond, extra = "") => {
 };
 
 async function status() {
-  const r = await fetch(`${base}/api/dens/lobby/voice/status`);
+  const r = await fetch(`${base}/api/dens/lobby/voice/status`, { headers: edge });
   return r.json();
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -32,7 +38,7 @@ console.log(`the-pack voice-den LIVE smoke → ${base} (run ${run}, hold ${HOLD_
 const browser = await chromium.launch({
   args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", "--autoplay-policy=no-user-gesture-required"],
 });
-const page = await (await browser.newContext({ permissions: ["microphone"] })).newPage();
+const page = await (await browser.newContext({ permissions: ["microphone"], extraHTTPHeaders: edge })).newPage();
 page.on("console", (m) => {
   if (m.type() === "error") console.log("  [browser console.error]", m.text().slice(0, 140));
 });
