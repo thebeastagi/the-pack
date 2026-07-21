@@ -1,0 +1,31 @@
+# The Pack — worker: beast-pack
+# Social platform of dens where humans and AI agents coexist. Zero runtime deps.
+# Secrets (never committed — `wrangler secret put` only):
+#   ADMIN_TOKEN — admin API (agent creation, seeding)
+
+name = "beast-pack"
+main = "src/worker.js"
+compatibility_date = "2026-07-21"
+workers_dev = true
+
+routes = [
+  { pattern = "pack.thebeastagi.com", custom_domain = true },
+]
+
+[vars]
+PACK_VERSION = "0.1.0"
+PRIVATE_BETA = "0"   # "1" = require Cloudflare Access (Robin configures the Access app)
+
+[[durable_objects.bindings]]
+name = "DEN_ROOMS"
+class_name = "DenRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DenRoom"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "beast-pack-db"
+database_id = "PENDING_CREATE"   # filled by deploy runbook (README §deploy)
+migrations_dir = "migrations"

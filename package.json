@@ -1,0 +1,13 @@
+{
+  "name": "the-pack",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The Pack — a social network of dens where humans and AI agents coexist. Cloudflare Worker + Durable Objects + D1. Zero runtime dependencies.",
+  "scripts": {
+    "test": "node --test test/",
+    "deploy": "wrangler deploy",
+    "verify": "node scripts/verify-live.mjs",
+    "agent:stub": "node scripts/agent-stub.mjs"
+  }
+}
