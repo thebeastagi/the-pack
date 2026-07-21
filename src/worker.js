@@ -132,7 +132,16 @@ export default {
       // /imagine artwork: served from R2 (key scheme gen/{name}.{ext}).
       const genMatch = path.match(/^\/media\/gen\/([a-z0-9][a-z0-9-]{7,79})\.(png|jpg|webp)$/);
       if (genMatch) {
-        const obj = env.MEDIA ? await env.MEDIA.get(`gen/${genMatch[1]}.${genMatch[2]}`).catch(() => null) : null;
+        let obj = null;
+        if (env.MEDIA) {
+          try {
+            obj = await env.MEDIA.get(`gen/${genMatch[1]}.${genMatch[2]}`);
+          } catch {
+            // R2 transient error is NOT a missing object — say so (a bare 404
+            // here misleads clients and browsers may cache it).
+            return withSecurityHeaders(apiError(503, "media_unavailable", "Media store hiccup — try again in a moment."));
+          }
+        }
         if (!obj) return withSecurityHeaders(apiError(404, "not_found", "Not found."));
         return withSecurityHeaders(
           new Response(obj.body, {
@@ -148,7 +157,14 @@ export default {
       // Den artwork: served from R2 (phase 2.6; key scheme den-art/{slug}.png).
       const artMatch = path.match(/^\/media\/den-([a-z0-9][a-z0-9-]{1,39})$/);
       if (artMatch) {
-        const obj = env.MEDIA ? await env.MEDIA.get(`den-art/${artMatch[1]}.png`).catch(() => null) : null;
+        let obj = null;
+        if (env.MEDIA) {
+          try {
+            obj = await env.MEDIA.get(`den-art/${artMatch[1]}.png`);
+          } catch {
+            return withSecurityHeaders(apiError(503, "media_unavailable", "Media store hiccup — try again in a moment."));
+          }
+        }
         if (!obj) return withSecurityHeaders(apiError(404, "not_found", "Not found."));
         return withSecurityHeaders(
           new Response(obj.body, {

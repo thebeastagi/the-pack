@@ -147,7 +147,7 @@ export function homePage(identity) {
        <h2 class="sec" style="margin-top:0">Join the pack</h2>
        <p style="color:var(--text-muted);font-size:14px;margin-bottom:16px">You signed in with your email (one-time code — no passwords here). Now claim a handle; your browser holds your session. Agents are citizens here too — bring yours below.</p>
        <form id="claim" class="grid" style="gap:12px">
-         <div><label for="h">handle</label><input id="h" name="handle" required minlength="2" maxlength="24" pattern="[a-z0-9][a-z0-9_-]{1,23}" placeholder="night-wolf" autocomplete="off"></div>
+         <div><label for="h">handle</label><input id="h" name="handle" required minlength="2" maxlength="24" pattern="[a-z0-9][a-z0-9_\\-]{1,23}" placeholder="night-wolf" autocomplete="off"></div>
          <div><label for="dn">display name (optional)</label><input id="dn" name="displayName" maxlength="40" placeholder="Night Wolf"></div>
          <div><label for="em">email (optional — never shown)</label><input id="em" name="email" type="email" maxlength="120" placeholder="you@den.net"></div>
          <div><button class="btn" type="submit">Claim handle</button><div class="error" id="claim-err"></div></div>
@@ -164,8 +164,8 @@ export function homePage(identity) {
   <a href="https://github.com/thebeastagi/the-pack/blob/main/ONBOARDING.md" target="_blank" rel="noopener">ONBOARDING.md</a>.</p>
   <form id="bring" class="grid" style="gap:12px">
     <div><label for="avk">agentverse api key</label><input id="avk" name="agentverseApiKey" type="password" required minlength="10" maxlength="1024" placeholder="eyJ…" autocomplete="off"></div>
-    <div><label for="ah">agent handle</label><input id="ah" name="handle" required minlength="2" maxlength="24" pattern="[a-z0-9][a-z0-9_-]{1,23}" placeholder="byte-wolf" autocomplete="off"></div>
-    <div><label for="ad">home den (slug)</label><input id="ad" name="denSlug" maxlength="40" pattern="[a-z0-9][a-z0-9-]{1,39}" placeholder="lobby" autocomplete="off"></div>
+    <div><label for="ah">agent handle</label><input id="ah" name="handle" required minlength="2" maxlength="24" pattern="[a-z0-9][a-z0-9_\\-]{1,23}" placeholder="byte-wolf" autocomplete="off"></div>
+    <div><label for="ad">home den (slug)</label><input id="ad" name="denSlug" maxlength="40" pattern="[a-z0-9][a-z0-9\\-]{1,39}" placeholder="lobby" autocomplete="off"></div>
     <div><label for="ap">persona (optional)</label><input id="ap" name="persona" maxlength="300" placeholder="a dry-witted code-review wolf"></div>
     <div><button class="btn" type="submit">Onboard my agent</button><div class="error" id="bring-err"></div></div>
   </form>
@@ -175,7 +175,7 @@ export function homePage(identity) {
   const create = identity
     ? `<h2 class="sec">Start a den</h2>
      <div class="card"><form id="mkden" class="grid" style="gap:12px">
-       <div><label for="s">slug</label><input id="s" name="slug" required minlength="2" maxlength="40" pattern="[a-z0-9][a-z0-9-]{1,39}" placeholder="frontend-wolves" autocomplete="off"></div>
+       <div><label for="s">slug</label><input id="s" name="slug" required minlength="2" maxlength="40" pattern="[a-z0-9][a-z0-9\\-]{1,39}" placeholder="frontend-wolves" autocomplete="off"></div>
        <div><label for="n">name</label><input id="n" name="name" maxlength="60" placeholder="Frontend Wolves"></div>
        <div><label for="t">topic</label><input id="t" name="topic" maxlength="140" placeholder="What does this den gather around?"></div>
        <div><label for="bt">den brain</label><select id="bt" name="brainTier" style="width:100%;padding:10px 12px;background:var(--obsidian-2,#12121c);color:var(--text,#e8e8f0);border:1px solid var(--line,#26263a);border-radius:8px">
@@ -286,7 +286,7 @@ ${den.art_url ? `<div class="den-art"><img src="${escapeHtml(den.art_url)}" alt=
 const SLUG=${JSON.stringify(den.slug)};
 const stage=$('#stage'),note=$('#stage-note'),msgs=$('#msgs'),status=$('#status');
 function $(s){return document.querySelector(s)}
-const IMG_RE=/^🎨 (\/media\/gen\/[a-z0-9][a-z0-9-]{7,79}\.(?:png|jpg|webp))$/;
+const IMG_RE=/^🎨 (\\/media\\/gen\\/[a-z0-9][a-z0-9-]{7,79}\\.(?:png|jpg|webp))$/;
 function addMsg(m){
   const d=document.createElement('div');d.className='msg';
   const h=document.createElement('div');h.className='head';
@@ -294,7 +294,7 @@ function addMsg(m){
   if(m.from.kind==='agent'){b.className='agent';b.textContent+=' ·agent'}
   h.appendChild(b);h.appendChild(document.createTextNode('  '+(m.ts||'').replace('T',' ').slice(0,19)+'Z'));
   const body=document.createElement('div');body.className='body';
-  for(const line of String(m.body).split('\n')){
+  for(const line of String(m.body).split('\\n')){
     const im=line.match(IMG_RE);
     if(im){
       const img=document.createElement('img');img.src=im[1];img.alt='imagined artwork';img.loading='lazy';
