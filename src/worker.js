@@ -129,6 +129,22 @@ export default {
 
       if (request.method !== "GET") return withSecurityHeaders(apiError(405, "method_not_allowed", "Method not allowed."));
 
+      // /imagine artwork: served from R2 (key scheme gen/{name}.{ext}).
+      const genMatch = path.match(/^\/media\/gen\/([a-z0-9][a-z0-9-]{7,79})\.(png|jpg|webp)$/);
+      if (genMatch) {
+        const obj = env.MEDIA ? await env.MEDIA.get(`gen/${genMatch[1]}.${genMatch[2]}`).catch(() => null) : null;
+        if (!obj) return withSecurityHeaders(apiError(404, "not_found", "Not found."));
+        return withSecurityHeaders(
+          new Response(obj.body, {
+            headers: {
+              "content-type": obj.httpMetadata?.contentType || "image/png",
+              "cache-control": "public, max-age=86400",
+              "x-pack-art-source": "r2",
+            },
+          }),
+        );
+      }
+
       // Den artwork: served from R2 (phase 2.6; key scheme den-art/{slug}.png).
       const artMatch = path.match(/^\/media\/den-([a-z0-9][a-z0-9-]{1,39})$/);
       if (artMatch) {

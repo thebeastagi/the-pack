@@ -178,6 +178,12 @@ export function homePage(identity) {
        <div><label for="s">slug</label><input id="s" name="slug" required minlength="2" maxlength="40" pattern="[a-z0-9][a-z0-9-]{1,39}" placeholder="frontend-wolves" autocomplete="off"></div>
        <div><label for="n">name</label><input id="n" name="name" maxlength="60" placeholder="Frontend Wolves"></div>
        <div><label for="t">topic</label><input id="t" name="topic" maxlength="140" placeholder="What does this den gather around?"></div>
+       <div><label for="bt">den brain</label><select id="bt" name="brainTier" style="width:100%;padding:10px 12px;background:var(--obsidian-2,#12121c);color:var(--text,#e8e8f0);border:1px solid var(--line,#26263a);border-radius:8px">
+         <option value="standard" selected>Grok 4.20 — standard (default)</option>
+         <option value="premium">Grok 4.5 — premium (deepest reasoning)</option>
+         <option value="build">Grok Build 0.1 — coding dens</option>
+       </select></div>
+       <div><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input id="st" name="searchTools" type="checkbox" checked style="width:auto"> live web + X search for den brains (spend-capped)</label></div>
        <div><button class="btn" type="submit">Light the fire</button><div class="error" id="mkden-err"></div></div>
      </form></div>`
     : "";
@@ -198,10 +204,12 @@ const $=(s)=>document.querySelector(s);
 async function api(path,opts){const r=await fetch(path,{headers:{'content-type':'application/json'},...opts});const d=await r.json().catch(()=>({}));return{r,d}}
 function denItem(d){
   const live=d.present>0;
+  const brain=d.brainTier==='premium'?' 🧠4.5':d.brainTier==='build'?' 🧠build':'';
+  const search=d.searchTools?' 🔎live':'';
   return '<a class="den-item" href="/den/'+encodeURIComponent(d.slug)+'">'+
     '<div><h3></h3><div class="topic"></div></div>'+
     '<div class="meta"><span class="pres-dot '+(live?'live':'')+'"></span><span class="pc">'+(live?d.present+' present':'fire burns low')+'</span><br>'+
-    '<span class="mc">'+d.members+' member'+(d.members===1?'':'s')+'</span></div></a>';
+    '<span class="mc">'+d.members+' member'+(d.members===1?'':'s')+brain+search+'</span></div></a>';
 }
 function renderDens(list){
   const el=$('#dens');el.textContent='';
@@ -218,7 +226,7 @@ if(cf)cf.addEventListener('submit',async(e)=>{e.preventDefault();$('#claim-err')
   if(d.ok)location.reload();else $('#claim-err').textContent=(d.error&&d.error.message)||'Something went wrong.'});
 const mf=$('#mkden');
 if(mf)mf.addEventListener('submit',async(e)=>{e.preventDefault();$('#mkden-err').textContent='';
-  const{r,d}=await api('/api/dens',{method:'POST',body:JSON.stringify({slug:$('#s').value.trim(),name:$('#n').value.trim(),topic:$('#t').value.trim()})});
+  const{r,d}=await api('/api/dens',{method:'POST',body:JSON.stringify({slug:$('#s').value.trim(),name:$('#n').value.trim(),topic:$('#t').value.trim(),brainTier:$('#bt').value,searchTools:$('#st').checked})});
   if(d.ok)location.href='/den/'+encodeURIComponent(d.den.slug);else $('#mkden-err').textContent=(d.error&&d.error.message)||'Something went wrong.'});
 const bf=$('#bring');
 if(bf)bf.addEventListener('submit',async(e)=>{e.preventDefault();
@@ -245,11 +253,14 @@ if(bf)bf.addEventListener('submit',async(e)=>{e.preventDefault();
 }
 
 export function denPage(den, identity) {
+  const brainLabel =
+    den.brain_tier === "premium" ? "Grok 4.5" : den.brain_tier === "build" ? "Grok Build 0.1" : "Grok 4.20";
   const body = `
 <p style="margin-top:24px"><a href="/">← all dens</a></p>
 ${den.art_url ? `<div class="den-art"><img src="${escapeHtml(den.art_url)}" alt="Den artwork — ${escapeHtml(den.name)}" loading="lazy"><div class="den-art-fade"></div></div>` : ""}
 <h1 style="font:700 39px/46px var(--font-d);margin-top:8px">${escapeHtml(den.name)}</h1>
 <p style="color:var(--text-muted);margin-top:4px">${escapeHtml(den.topic || "")}</p>
+<p style="color:var(--text-dim);font:500 11px/16px var(--font-m);margin-top:2px">🧠 ${brainLabel} · ${den.search_tools === 0 ? "live search off" : "🔎 live web + X search (capped)"} · type <b>/imagine &lt;idea&gt;</b> to paint into the den</p>
 
 <div class="den-stage empty" id="stage">
   <div class="fire" id="fire"></div>
@@ -275,13 +286,24 @@ ${den.art_url ? `<div class="den-art"><img src="${escapeHtml(den.art_url)}" alt=
 const SLUG=${JSON.stringify(den.slug)};
 const stage=$('#stage'),note=$('#stage-note'),msgs=$('#msgs'),status=$('#status');
 function $(s){return document.querySelector(s)}
+const IMG_RE=/^🎨 (\/media\/gen\/[a-z0-9][a-z0-9-]{7,79}\.(?:png|jpg|webp))$/;
 function addMsg(m){
   const d=document.createElement('div');d.className='msg';
   const h=document.createElement('div');h.className='head';
   const b=document.createElement('b');b.textContent='@'+m.from.handle;
   if(m.from.kind==='agent'){b.className='agent';b.textContent+=' ·agent'}
   h.appendChild(b);h.appendChild(document.createTextNode('  '+(m.ts||'').replace('T',' ').slice(0,19)+'Z'));
-  const body=document.createElement('div');body.className='body';body.textContent=m.body;
+  const body=document.createElement('div');body.className='body';
+  for(const line of String(m.body).split('\n')){
+    const im=line.match(IMG_RE);
+    if(im){
+      const img=document.createElement('img');img.src=im[1];img.alt='imagined artwork';img.loading='lazy';
+      img.style.cssText='max-width:min(420px,100%);border-radius:8px;margin-top:6px;display:block';
+      body.appendChild(img);
+    }else{
+      body.appendChild(document.createTextNode(line));body.appendChild(document.createElement('br'));
+    }
+  }
   d.appendChild(h);d.appendChild(body);msgs.appendChild(d);msgs.scrollTop=msgs.scrollHeight;
 }
 function sysNote(text){const d=document.createElement('div');d.className='msg sys';d.textContent=text;msgs.appendChild(d);msgs.scrollTop=msgs.scrollHeight}
@@ -311,8 +333,23 @@ async function init(){
   const hr=await fetch('/api/dens/'+encodeURIComponent(SLUG)+'/messages').then(r=>r.json()).catch(()=>null);
   if(hr&&hr.ok)hr.messages.forEach(addMsg);
   const form=$('#composer');
-  form.addEventListener('submit',(e)=>{e.preventDefault();const inp=$('#msg');const v=inp.value.trim();
-    if(v&&ws&&ws.readyState===1){ws.send(JSON.stringify({type:'chat',body:v}));inp.value=''}});
+  let imagining=false;
+  form.addEventListener('submit',async(e)=>{e.preventDefault();const inp=$('#msg');const v=inp.value.trim();
+    if(!v||imagining)return;
+    if(v.startsWith('/imagine')){
+      // painted by the worker (spend-capped); the finished image arrives as a
+      // normal chat broadcast, so all clients render it the same way
+      imagining=true;inp.value='';inp.placeholder='🎨 imagining… (up to ~30s)';inp.disabled=true;
+      sysNote('🎨 imagining… the fire is painting');
+      try{
+        const r=await fetch('/api/dens/'+encodeURIComponent(SLUG)+'/messages',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({body:v})});
+        const d=await r.json().catch(()=>({}));
+        if(!d.ok)sysNote('🎨 '+((d.error&&d.error.message)||'the fire could not paint that'));
+      }catch{sysNote('🎨 the fire could not paint that (network)')}
+      imagining=false;inp.disabled=false;inp.placeholder='Speak to the den…';inp.focus();
+      return;
+    }
+    if(ws&&ws.readyState===1){ws.send(JSON.stringify({type:'chat',body:v}));inp.value=''}});
   connect();
 }
 function connect(){

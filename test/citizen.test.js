@@ -29,6 +29,7 @@ function makeEnv(overrides = {}) {
     PACK_VERSION: "test",
     PRIVATE_BETA: "0",
     HOSTNAME: "pack.test",
+    PACK_SEARCH_DEFAULT: "0", // these tests pin the tools-off path; brain.test.js owns live search
     ...overrides,
   };
 }

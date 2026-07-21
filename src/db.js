@@ -18,7 +18,7 @@ export const SQL = {
   agentKeyById: "SELECT * FROM agent_keys WHERE id = ? AND revoked_at IS NULL",
 
   insertDen:
-    "INSERT INTO dens (id, slug, name, topic, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT INTO dens (id, slug, name, topic, brain_tier, search_tools, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   denBySlug: "SELECT * FROM dens WHERE slug = ?",
   denById: "SELECT * FROM dens WHERE id = ?",
   listDens: "SELECT * FROM dens ORDER BY created_at ASC LIMIT 200",
@@ -42,6 +42,14 @@ export const SQL = {
     "INSERT INTO voice_flags (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
 
   denSetArtUrl: "UPDATE dens SET art_url = ? WHERE id = ?",
+
+  // ── Grok brain spend ledger (migration 0006) ─────────────────────────────
+  brainUsageGet: "SELECT calls, ticks FROM brain_usage WHERE day = ? AND den = ? AND kind = ?",
+  brainUsageGlobalTicks:
+    "SELECT COALESCE(SUM(ticks), 0) AS ticks FROM brain_usage WHERE day = ? AND den = '*'",
+  brainUsageAdd:
+    "INSERT INTO brain_usage (day, den, kind, calls, ticks) VALUES (?, ?, ?, ?, ?) ON CONFLICT(day, den, kind) DO UPDATE SET calls = calls + excluded.calls, ticks = ticks + excluded.ticks",
+  brainUsageDay: "SELECT den, kind, calls, ticks FROM brain_usage WHERE day = ? ORDER BY den, kind",
 };
 
 export async function createUser(db, { handle, displayName = "", email = null, kind = "human" }) {
@@ -96,11 +104,20 @@ export async function getAgentKey(db, keyHash) {
   return db.prepare(SQL.agentKeyById).bind(keyHash).first();
 }
 
-export async function createDen(db, { slug, name, topic = "", createdBy }) {
-  const den = { id: uuid(), slug, name, topic, created_by: createdBy, created_at: nowIso() };
+export async function createDen(db, { slug, name, topic = "", createdBy, brainTier = "standard", searchTools = true }) {
+  const den = {
+    id: uuid(),
+    slug,
+    name,
+    topic,
+    brain_tier: brainTier,
+    search_tools: searchTools ? 1 : 0,
+    created_by: createdBy,
+    created_at: nowIso(),
+  };
   await db
     .prepare(SQL.insertDen)
-    .bind(den.id, den.slug, den.name, den.topic, den.created_by, den.created_at)
+    .bind(den.id, den.slug, den.name, den.topic, den.brain_tier, den.search_tools, den.created_by, den.created_at)
     .run();
   return den;
 }
@@ -146,6 +163,34 @@ export async function markDenArt(db, denId, artUrl) {
   await db.prepare(SQL.denSetArtUrl).bind(artUrl, denId).run();
 }
 
+// ── Grok brain spend ledger (migration 0006) ───────────────────────────────
+// Every paid xAI surface (search tools, image gen, tool-enabled completions)
+// logs here per den AND under the '*' global sentinel. Cap checks read single
+// rows; a read failure must be treated as "over cap" (fail closed — callers).
+
+export async function getBrainUsage(db, day, den, kind) {
+  const row = await db.prepare(SQL.brainUsageGet).bind(day, den, kind).first();
+  return { calls: Number(row?.calls) || 0, ticks: Number(row?.ticks) || 0 };
+}
+
+export async function getGlobalBrainTicks(db, day) {
+  const row = await db.prepare(SQL.brainUsageGlobalTicks).bind(day).first();
+  return Number(row?.ticks) || 0;
+}
+
+export async function addBrainUsage(db, day, den, kind, calls, ticks) {
+  const c = Math.max(0, Math.round(calls));
+  const t = Math.max(0, Math.round(ticks));
+  for (const scope of [den, "*"]) {
+    await db.prepare(SQL.brainUsageAdd).bind(day, scope, kind, c, t).run();
+  }
+}
+
+export async function listBrainUsage(db, day) {
+  const res = await db.prepare(SQL.brainUsageDay).bind(day).all();
+  return res.results || [];
+}
+
 // ── agent citizens (kind='agent') ───────────────────────────────────────────
 export async function listAgentUsers(db) {
   const res = await db.prepare(SQL.agentUsers).all();
@@ -176,12 +221,23 @@ export function publicUser(u) {
   return { handle: u.handle, display: u.display_name || u.handle, kind: u.kind };
 }
 
+// Brain defaults: rows pre-dating migration 0006 carry the column defaults
+// ('standard' / 1); undefined (hermetic fakes aside) means the same.
+export function denBrainTier(d) {
+  return typeof d?.brain_tier === "string" && d.brain_tier ? d.brain_tier : "standard";
+}
+export function denSearchTools(d) {
+  return d?.search_tools === 0 ? false : true;
+}
+
 export function publicDen(d, extra = {}) {
   return {
     slug: d.slug,
     name: d.name,
     topic: d.topic || "",
     createdAt: d.created_at,
+    brainTier: denBrainTier(d),
+    searchTools: denSearchTools(d),
     ...(d.art_url ? { artUrl: d.art_url } : {}),
     ...extra,
   };

@@ -5,7 +5,7 @@ import { SQL } from "../src/db.js";
 import { DenRoom } from "../src/den-room.js";
 
 export function createFakeD1() {
-  const t = { users: [], sessions: [], agent_keys: [], dens: [], den_members: [], messages: [], voice_usage: [], voice_flags: [] };
+  const t = { users: [], sessions: [], agent_keys: [], dens: [], den_members: [], messages: [], voice_usage: [], voice_flags: [], brain_usage: [] };
   const clone = (r) => (r ? structuredClone(r) : r);
   const handlers = {
     [SQL.insertUser]: {
@@ -44,7 +44,7 @@ export function createFakeD1() {
     [SQL.insertDen]: {
       run(a) {
         if (t.dens.some((d) => d.slug === a[1])) throw new Error("UNIQUE constraint failed: dens.slug");
-        t.dens.push({ id: a[0], slug: a[1], name: a[2], topic: a[3], created_by: a[4], created_at: a[5] });
+        t.dens.push({ id: a[0], slug: a[1], name: a[2], topic: a[3], brain_tier: a[4], search_tools: a[5], created_by: a[6], created_at: a[7] });
       },
     },
     [SQL.denBySlug]: { first: (a) => clone(t.dens.find((d) => d.slug === a[0])) },
@@ -97,6 +97,28 @@ export function createFakeD1() {
         if (row) row.v = a[1];
         else t.voice_flags.push({ k: a[0], v: a[1] });
       },
+    },
+    [SQL.brainUsageGet]: {
+      first: (a) => clone(t.brain_usage.find((r) => r.day === a[0] && r.den === a[1] && r.kind === a[2]) || null),
+    },
+    [SQL.brainUsageGlobalTicks]: {
+      first: (a) => ({
+        ticks: t.brain_usage.filter((r) => r.day === a[0] && r.den === "*").reduce((s, r) => s + r.ticks, 0),
+      }),
+    },
+    [SQL.brainUsageAdd]: {
+      run(a) {
+        const row = t.brain_usage.find((r) => r.day === a[0] && r.den === a[1] && r.kind === a[2]);
+        if (row) {
+          row.calls += a[3];
+          row.ticks += a[4];
+        } else {
+          t.brain_usage.push({ day: a[0], den: a[1], kind: a[2], calls: a[3], ticks: a[4] });
+        }
+      },
+    },
+    [SQL.brainUsageDay]: {
+      all: (a) => clone(t.brain_usage.filter((r) => r.day === a[0])),
     },
   };
 

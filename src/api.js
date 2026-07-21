@@ -4,7 +4,19 @@ import { clearSessionCookieHeader, issueSession, resolveIdentity, sessionCookieH
 import { memoryConfigFromEnv, searchEpisodes } from "./memory.js";
 import { PROVENANCE_ALG, PROVENANCE_KEY_ID, publicKeyJwk } from "./aevs.js";
 import { recordPackEpisode } from "./episodes.js";
-import { citizenSystemPrompt, grokChat, grokConfigFromEnv } from "./grok.js";
+import {
+  BRAIN_TIERS,
+  brainModelForTier,
+  citizenSystemPrompt,
+  estimateTicks,
+  grokChat,
+  grokConfigFromEnv,
+  grokImage,
+  grokSearchChat,
+  imageModelFromEnv,
+  isBrainTier,
+} from "./grok.js";
+import { brainAllowed, brainCapsFromEnv, logBrainUsage, todayKey } from "./caps.js";
 import { agentverseClient, renderCitizenAgent } from "./onboarding.js";
 import {
   apiError, clampStr, clientIp, isHandle, isSlug, json, randomToken, safeEqualHex, sha256Hex, softRateLimit,
@@ -54,6 +66,9 @@ export async function handleApi(request, env, url, ctx = null) {
         agentverse_memory: Boolean(memoryConfigFromEnv(env)),
         provenance_signing: Boolean(publicKeyJwk(env)),
         grok_brain: Boolean(grokConfigFromEnv(env)),
+        live_search: Boolean(grokConfigFromEnv(env)) && env.PACK_SEARCH_DEFAULT !== "0",
+        imagine: Boolean(grokConfigFromEnv(env)),
+        brain_tiers: Object.keys(BRAIN_TIERS),
         self_serve_agents: true,
         hosted_agents: env.DEN_KEEPER_AGENT_ADDRESS
           ? [{ handle: "den-keeper", platform: "agentverse", address: env.DEN_KEEPER_AGENT_ADDRESS }]
@@ -263,8 +278,16 @@ export async function handleApi(request, env, url, ctx = null) {
     }
     const name = clampStr(body.name, 60) || slug;
     const topic = clampStr(body.topic, 140);
+    // Brain config (2026-07-21): tier + live-search toggle. Live search is
+    // ON by default for new dens — it is spend-capped per den and globally,
+    // so default-on cannot burn the console budget.
+    const brainTier = body.brainTier == null ? "standard" : clampStr(body.brainTier, 20);
+    if (!isBrainTier(brainTier)) {
+      return apiError(400, "bad_brain_tier", `Brain tier must be one of: ${Object.keys(BRAIN_TIERS).join(", ")}.`);
+    }
+    const searchTools = body.searchTools !== false;
     if (await db.getDenBySlug(env.DB, slug)) return apiError(409, "slug_taken", "A den with that slug exists.");
-    const den = await db.createDen(env.DB, { slug, name, topic, createdBy: identity.user.id });
+    const den = await db.createDen(env.DB, { slug, name, topic, createdBy: identity.user.id, brainTier, searchTools });
     await db.addMember(env.DB, { denId: den.id, userId: identity.user.id, role: "owner" });
     recordPackEpisode(env, ctx, "den_created", slug, `"${den.name}" opened by ${identity.user.handle}${topic ? ` — ${topic}` : ""}`);
     return json({ ok: true, den: db.publicDen(den, { present: 0, members: 1 }) }, { status: 201 });
@@ -339,12 +362,56 @@ export async function handleApi(request, env, url, ctx = null) {
       let text = clampStr(body.body, 2000);
       if (!text) return apiError(400, "empty_message", "Message body required.");
       let generated = false;
+      let imagined = false;
+      let brain = null;
+
+      // ── /imagine (any citizen): paint an image into the den via xAI
+      // Imagine (~$0.002/img). Spend-capped per den + globally (fail closed);
+      // bytes land in R2 and the message carries a /media/gen/ reference the
+      // den page renders inline.
+      if (text.startsWith("/imagine")) {
+        const prompt = text.replace(/^\/imagine\s*/, "").trim().slice(0, 400);
+        if (!prompt) {
+          return apiError(400, "imagine_empty", "Usage: /imagine <what should the fire dream up?>");
+        }
+        if (!softRateLimit(`imagine:${identity.user.id}`, 10, 3600_000)) {
+          return apiError(429, "rate_limited", "The fire needs a breather between paintings (10/hour).");
+        }
+        const cfg = grokConfigFromEnv(env);
+        if (!cfg || !env.MEDIA) {
+          return apiError(503, "imagine_not_configured", "Imagine is not configured on this worker.");
+        }
+        const cap = await brainAllowed(env, den.slug, "image");
+        if (!cap.allowed) {
+          const why =
+            cap.reason === "daily_usd_cap"
+              ? "the pack's daily brain budget is spent — the fire rests until tomorrow (UTC)"
+              : cap.reason === "den_cap"
+                ? `this den painted its daily share (${cap.cap}/day) — try tomorrow`
+                : "the imagine budget is resting — try later";
+          return apiError(429, "imagine_capped", `No image this time: ${why}. Nothing was charged.`);
+        }
+        const out = await grokImage(cfg, { prompt, model: imageModelFromEnv(env) });
+        if (!out.ok) {
+          return apiError(503, "imagine_unavailable", `The fire couldn't paint that (${out.reason}). Nothing was charged.`);
+        }
+        if (out.bytes.length < 1000 || out.bytes.length > 8 * 1024 * 1024) {
+          return apiError(502, "imagine_bad_image", "Generated image failed size sanity checks.");
+        }
+        const ext = out.mime === "image/jpeg" ? "jpg" : out.mime === "image/webp" ? "webp" : "png";
+        const name = `${den.slug}-${randomToken(8)}`;
+        await env.MEDIA.put(`gen/${name}.${ext}`, out.bytes, { httpMetadata: { contentType: out.mime } });
+        await logBrainUsage(env, den.slug, "image", 1, out.ticks || estimateTicks("image", 1));
+        text = `/imagine ${prompt}\n🎨 /media/gen/${name}.${ext}`;
+        imagined = true;
+      }
 
       // ── Grok brain seam (agent citizens only): {"generate": true} turns the
       // body into a server-side xAI completion, stored as the agent's message.
       // Hosted pack citizens use this so every agent is Grok-brained without
       // the owner needing an xAI key. Honest 503 → agent posts a scripted
       // fallback instead (see agents/pack-citizen/agent.py).
+      // 2026-07-21: per-den brain tier + live web/X search (spend-capped).
       if (body.generate === true) {
         if (identity.user.kind !== "agent") {
           return apiError(403, "agents_only", "The generate seam is for agent citizens, not humans.");
@@ -355,21 +422,54 @@ export async function handleApi(request, env, url, ctx = null) {
         const cfg = grokConfigFromEnv(env);
         if (!cfg) return apiError(503, "grok_not_configured", "Grok brain is not configured on this worker.");
         const presence = await livePresence(env, den);
-        const out = await grokChat(cfg, {
-          system: citizenSystemPrompt({
-            handle: identity.user.handle,
-            persona: clampStr(body.persona, 300),
-            denName: den.name,
-            denTopic: den.topic || "",
-            present: presence.present,
-          }),
-          user: text.slice(0, 1500),
-        });
-        if (!out.ok) {
+        const tier = isBrainTier(db.denBrainTier(den)) ? db.denBrainTier(den) : "standard";
+        const model = brainModelForTier(env, tier);
+        const searchOn = db.denSearchTools(den) && env.PACK_SEARCH_DEFAULT !== "0";
+        const prompt = {
+          persona: clampStr(body.persona, 300),
+          denName: den.name,
+          denTopic: den.topic || "",
+          present: presence.present,
+        };
+        let search = "off";
+        let out = null;
+        if (searchOn) {
+          const cap = await brainAllowed(env, den.slug, "search");
+          if (cap.allowed) {
+            out = await grokSearchChat(cfg, {
+              model,
+              cacheKey: `pack-den-${den.slug}`,
+              system: citizenSystemPrompt({ handle: identity.user.handle, ...prompt, liveSearch: true }),
+              user: text.slice(0, 1500),
+            });
+            if (out.ok) {
+              search = out.toolCalls > 0 ? "used" : "offered";
+              await logBrainUsage(env, den.slug, "search", out.toolCalls, out.ticks || estimateTicks("search", out.toolCalls));
+            }
+          } else {
+            search = cap.reason === "usage_read_failed" ? "closed" : "capped";
+          }
+        }
+        if (out && !out.ok) {
+          // Same contract as before: honest 503, agent posts a scripted fallback.
           return apiError(503, "grok_unavailable", `Grok brain unreachable (${out.reason}). Post a scripted fallback instead.`);
+        }
+        if (!out) {
+          // Tools-off path (search disabled, capped, or fail-closed): plain
+          // completion on the den's brain tier. No paid tool spend possible.
+          out = await grokChat(cfg, {
+            model,
+            system: citizenSystemPrompt({ handle: identity.user.handle, ...prompt }),
+            user: text.slice(0, 1500),
+          });
+          if (!out.ok) {
+            return apiError(503, "grok_unavailable", `Grok brain unreachable (${out.reason}). Post a scripted fallback instead.`);
+          }
+          await logBrainUsage(env, den.slug, "chat", 0, out.ticks || 0);
         }
         text = out.text;
         generated = true;
+        brain = { tier, model, search };
       }
 
       const msg = await db.createMessage(env.DB, { denId: den.id, userId: identity.user.id, body: text });
@@ -394,7 +494,7 @@ export async function handleApi(request, env, url, ctx = null) {
           `${identity.user.handle}: ${text.slice(0, 300)}`,
         );
       }
-      return json({ ok: true, message: frame, generated }, { status: 201 });
+      return json({ ok: true, message: frame, generated, imagined, ...(brain ? { brain } : {}) }, { status: 201 });
     }
   }
 
@@ -454,6 +554,23 @@ export async function handleApi(request, env, url, ctx = null) {
         record: result.record,
         signature: result.signature,
         verify_with: "/api/aevs/pubkey",
+      });
+    }
+
+    // Spend ledger readout (per-den + '*' global rollup) for the brain
+    // surfaces. Evidence trail for the console budget; ticks are exact xAI
+    // cost_in_usd_ticks (1 USD = 1e10 ticks).
+    if (path === "/api/admin/brain-usage" && method === "GET") {
+      const day = clampStr(url.searchParams.get("day"), 10) || todayKey();
+      const rows = await db.listBrainUsage(env.DB, day);
+      const globalTicks = rows.filter((r) => r.den === "*").reduce((s, r) => s + (Number(r.ticks) || 0), 0);
+      return json({
+        ok: true,
+        day,
+        rows,
+        globalTicks,
+        globalUsd: globalTicks / 10_000_000_000,
+        caps: brainCapsFromEnv(env),
       });
     }
 
