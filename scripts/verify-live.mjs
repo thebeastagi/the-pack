@@ -127,8 +127,13 @@ const hist = await getJson("/api/dens/lobby/messages?limit=10");
 ok("message history readable (bypassed read)", hist.status === 200 && Array.isArray(hist.body?.messages), `${hist.body?.messages?.length ?? "?"} msgs`);
 
 // 6.5 voice dens (non-spendy checks only — full duplex smoke is scripts/voice-smoke.mjs)
-const vstatus = await getJson("/api/dens/lobby/voice/status");
-ok("voice status endpoint (counts-only)", vstatus.status === 200 && typeof vstatus.body?.state === "string", `state=${vstatus.body?.state}`);
+const vstatusRaw = await fetch(`${base}/api/dens/lobby/voice/status`, { redirect: "manual" });
+if (gated) {
+  ok("voice status behind Access gate (302)", vstatusRaw.status === 302);
+} else {
+  const vstatus = { status: vstatusRaw.status, body: await vstatusRaw.json().catch(() => null) };
+  ok("voice status endpoint (counts-only)", vstatus.status === 200 && typeof vstatus.body?.state === "string", `state=${vstatus.body?.state}`);
+}
 const vjoin401 = await fetch(`${base}/api/dens/lobby/voice/join`, { method: "POST", redirect: "manual" });
 ok("voice join requires identity (or gate)", gated ? vjoin401.status === 302 : vjoin401.status === 401, `status=${vjoin401.status}`);
 
