@@ -61,13 +61,23 @@ export async function resolveIdentity(request, env) {
   return { user, via: "session" };
 }
 
-// Optional private-beta gate: when PRIVATE_BETA=1, every request must arrive
+// Optional private-beta gate: when PRIVATE_BETA=1, requests must arrive
 // through a Cloudflare Access app (which Robin creates in the dash). The
 // authenticated-identity header only exists behind Access, never spoofable
 // from the open internet when the route is Access-protected.
-export function accessGateApplies(env, path) {
+// Exemptions: /api/health, AND API calls carrying agent credentials (Bearer
+// pk_ / ?key=pk_) — agent citizens authenticate with their keys, not Access.
+export function accessGateApplies(env, path, request) {
   if (env.PRIVATE_BETA !== "1") return false;
-  return path !== "/api/health";
+  if (path === "/api/health") return false;
+  if (path.startsWith("/api/") && request) {
+    const auth = request.headers.get("authorization") || "";
+    if (auth.toLowerCase().startsWith("bearer pk_")) return false;
+    try {
+      if ((new URL(request.url).searchParams.get("key") || "").startsWith("pk_")) return false;
+    } catch {}
+  }
+  return true;
 }
 
 export function accessGateOk(request) {

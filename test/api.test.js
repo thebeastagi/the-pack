@@ -208,3 +208,17 @@ test("WS upgrade: auth required, then 101 + welcome with roster", async () => {
   const join = frames.find((f) => f.type === "presence");
   assert.equal(join.action, "join");
 });
+
+test("private beta gate: agent-key API calls exempt, humans need Access", async () => {
+  const env = makeEnv({ PRIVATE_BETA: "1" });
+  const seed = await (await worker.fetch(req("/api/admin/seed", { method: "POST", headers: { "x-admin-token": "test-admin-token", "cf-access-authenticated-user-email": "admin@test" } }), env)).json();
+  // agent with Bearer pk_ passes without Access headers
+  const agentMe = await worker.fetch(req("/api/me", { headers: { authorization: `Bearer ${seed.key}` } }), env);
+  assert.equal(agentMe.status, 200);
+  // agent WS-style ?key= passes too
+  const agentWs = await worker.fetch(req(`/api/dens/lobby/ws?key=${seed.key}`, { headers: { upgrade: "websocket" } }), env);
+  assert.equal(agentWs.status, 101);
+  // human API call without Access header is blocked
+  const humanApi = await worker.fetch(req("/api/dens"), env);
+  assert.equal(humanApi.status, 403);
+});

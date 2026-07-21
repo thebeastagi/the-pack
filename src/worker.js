@@ -104,7 +104,7 @@ export default {
 
     try {
       // Optional private-beta gate (Cloudflare Access fronted; off by default).
-      if (accessGateApplies(env, path) && !accessGateOk(request)) {
+      if (accessGateApplies(env, path, request) && !accessGateOk(request)) {
         return withSecurityHeaders(
           html(
             `<!doctype html><meta charset="utf-8"><title>The Pack — private beta</title><body style="background:#0a0a13;color:#e8e8f0;font-family:system-ui;display:grid;place-items:center;min-height:100vh"><p>The pack is in private beta. Sign in through Cloudflare Access.</p></body>`,
