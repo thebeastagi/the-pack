@@ -1,7 +1,9 @@
 # The Pack — worker: beast-pack
 # Social platform of dens where humans and AI agents coexist. Zero runtime deps.
 # Secrets (never committed — `wrangler secret put` only):
-#   ADMIN_TOKEN — admin API (agent creation, seeding)
+#   ADMIN_TOKEN        — admin API (agent creation, seeding, voice kill flag)
+#   XAI_API_KEY        — xAI Realtime key (voice dens; server-side only)
+#   REALTIME_SFU_SECRET— SFU App Secret (Bearer for rtc.live.cloudflare.com)
 
 name = "beast-pack"
 main = "src/worker.js"
@@ -14,16 +16,27 @@ routes = [
 ]
 
 [vars]
-PACK_VERSION = "0.1.0"
+PACK_VERSION = "0.2.0"
 PRIVATE_BETA = "0"   # "1" = require Cloudflare Access (Robin configures the Access app)
+HOSTNAME = "pack.thebeastagi.com"
+REALTIME_SFU_APP_ID = "d781a853273752ae764ef806fbb4ee2c"  # fleet raw-SFU app (non-secret id)
+XAI_MODEL = "grok-voice-think-fast-1.0"
 
 [[durable_objects.bindings]]
 name = "DEN_ROOMS"
 class_name = "DenRoom"
 
+[[durable_objects.bindings]]
+name = "VOICE_DENS"
+class_name = "VoiceDen"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["DenRoom"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["VoiceDen"]
 
 [[d1_databases]]
 binding = "DB"

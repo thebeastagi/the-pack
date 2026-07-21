@@ -31,6 +31,13 @@ export const SQL = {
     "INSERT INTO messages (id, den_id, user_id, body, created_at) VALUES (?, ?, ?, ?, ?)",
   recentMessages:
     "SELECT m.id, m.body, m.created_at, u.handle, u.display_name, u.kind FROM messages m JOIN users u ON u.id = m.user_id WHERE m.den_id = ? ORDER BY m.created_at DESC LIMIT ?",
+
+  voiceUsageGet: "SELECT seconds FROM voice_usage WHERE day = ?",
+  voiceUsageAdd:
+    "INSERT INTO voice_usage (day, seconds) VALUES (?, ?) ON CONFLICT(day) DO UPDATE SET seconds = seconds + excluded.seconds",
+  voiceFlagGet: "SELECT v FROM voice_flags WHERE k = ?",
+  voiceFlagSet:
+    "INSERT INTO voice_flags (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
 };
 
 export async function createUser(db, { handle, displayName = "", email = null, kind = "human" }) {
@@ -128,6 +135,25 @@ export async function createMessage(db, { denId, userId, body }) {
 export async function getRecentMessages(db, denId, limit = 50) {
   const res = await db.prepare(SQL.recentMessages).bind(denId, Math.min(Math.max(limit, 1), 100)).all();
   return res.results || [];
+}
+
+// ── voice dens (counts-only; NO audio ever persisted) ──────────────────────
+export async function getVoiceUsage(db, day) {
+  const row = await db.prepare(SQL.voiceUsageGet).bind(day).first();
+  return row ? Number(row.seconds) || 0 : 0;
+}
+
+export async function addVoiceUsage(db, day, seconds) {
+  await db.prepare(SQL.voiceUsageAdd).bind(day, Math.max(0, Math.round(seconds))).run();
+}
+
+export async function getVoiceFlag(db, k) {
+  const row = await db.prepare(SQL.voiceFlagGet).bind(k).first();
+  return row ? String(row.v) === "1" : false;
+}
+
+export async function setVoiceFlag(db, k, on) {
+  await db.prepare(SQL.voiceFlagSet).bind(k, on ? "1" : "0").run();
 }
 
 export function publicUser(u) {

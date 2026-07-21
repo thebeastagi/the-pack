@@ -79,6 +79,17 @@ footer.site{margin-top:96px;padding:32px 0;border-top:1px solid var(--line);
 .seat .who{font:500 10px/14px var(--font-m);color:var(--text-dim);margin-top:4px;max-width:72px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kind-badge{font:500 9px/12px var(--font-m);color:var(--beast-violet);border:1px solid var(--beast-violet);border-radius:4px;padding:0 3px;margin-left:4px}
 
+/* ── voice den ── */
+.voice-bar{display:flex;align-items:center;gap:12px;margin:0 0 16px;padding:14px 20px;
+  background:var(--obsidian-2);border:1px solid var(--line);border-radius:var(--radius);flex-wrap:wrap}
+.voice-bar .vstatus{font:500 12px/16px var(--font-m);color:var(--text-dim)}
+.voice-bar .vstatus.live{color:var(--beast-cyan)}
+.voice-bar .cost{font:500 12px/16px var(--font-m);color:var(--text-dim);margin-left:auto}
+.fire.speaking{box-shadow:0 0 28px var(--beast-glow-cyan),0 0 48px rgba(255,138,60,.25);
+  animation:flicker-a 2.1s ease-in-out infinite}
+.mic-dot{width:8px;height:8px;border-radius:999px;background:var(--obsidian-5);display:inline-block}
+.mic-dot.hot{background:var(--den-fire);box-shadow:0 0 8px rgba(255,138,60,.5)}
+
 /* ── chat ── */
 .chat{background:var(--obsidian-2);border:1px solid var(--line);border-radius:var(--radius);display:flex;flex-direction:column;height:420px}
 .msgs{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:12px}
@@ -195,8 +206,15 @@ export function denPage(den, identity) {
 <p style="color:var(--text-muted);margin-top:4px">${escapeHtml(den.topic || "")}</p>
 
 <div class="den-stage empty" id="stage">
-  <div class="fire"></div>
+  <div class="fire" id="fire"></div>
   <div class="empty-note" id="stage-note">the fire burns low — the pack is elsewhere</div>
+</div>
+
+<div class="voice-bar" id="voice-bar">
+  <span class="mic-dot" id="mic-dot"></span>
+  <span class="vstatus" id="vstatus">voice den: the Den Keeper can speak here</span>
+  ${identity ? '<button class="btn ghost" id="voice-btn" type="button">🎙 Join voice</button>' : '<span class="vstatus">claim a handle to join voice</span>'}
+  <span class="cost" id="vcost"></span>
 </div>
 
 <div class="chat">
@@ -267,6 +285,101 @@ function connect(){
   ws.addEventListener('close',()=>{status.textContent='reconnecting…';setTimeout(connect,1500)});
 }
 init();
+
+// ── voice den (campfire voice: you hear the Den Keeper; it hears everyone) ──
+const vbtn=$('#voice-btn'),vstatus=$('#vstatus'),vcost=$('#vcost'),micDot=$('#mic-dot'),fire=$('#fire');
+const STUN='stun:stun.cloudflare.com:3478';
+let vSeat=null,vUrls=null,vCtl=null,pcMic=null,pcListen=null,micStream=null,remoteAudio=null,inVoice=false,vStart=0,vClock=0,audioCtx=null;
+function vSet(t,live){vstatus.textContent=t;vstatus.className='vstatus'+(live?' live':'')}
+function vTick(){const s=Math.floor((Date.now()-vStart)/1000);
+  vcost.textContent=s>0?('voice '+Math.floor(s/60)+':'+String(s%60).padStart(2,'0')+' · $'+((s/60)*0.05).toFixed(3)+' metered'):''}
+async function joinVoice(){
+  if(inVoice||!vbtn)return;
+  vbtn.disabled=true;vSet('joining voice…',true);
+  try{
+    const jr=await fetch('/api/dens/'+encodeURIComponent(SLUG)+'/voice/join',{method:'POST'}).then(r=>r.json());
+    if(!jr.ok){vSet('cannot join voice: '+(jr.error||'failed'));vbtn.disabled=false;return}
+    vSeat=jr.seatId;vUrls=jr.urls;
+    vCtl=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+vUrls.control);
+    vCtl.addEventListener('message',(ev)=>{let f;try{f=JSON.parse(ev.data)}catch{return}onVoiceCtl(f)});
+    vCtl.addEventListener('close',()=>{if(inVoice)leaveVoice('voice channel closed')});
+    micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});
+    // TWO PeerConnections (one negotiation per offer — the SFU rejects shared offers with 425)
+    pcMic=new RTCPeerConnection({iceServers:[{urls:STUN}]});
+    for(const t of micStream.getTracks())pcMic.addTrack(t,micStream);
+    pcListen=new RTCPeerConnection({iceServers:[{urls:STUN}]});
+    pcListen.addTransceiver('audio',{direction:'recvonly'});
+    remoteAudio=new Audio();remoteAudio.autoplay=true;
+    pcListen.ontrack=(ev)=>{remoteAudio.srcObject=ev.streams[0];remoteAudio.play().catch(()=>{});watchAiLevel(ev.streams[0])};
+    const micOffer=await pcMic.createOffer();await pcMic.setLocalDescription(micOffer);await waitIce(pcMic);
+    vSet('negotiating mic…',true);
+    const micRes=await fetch(vUrls.sdpMic,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({seatId:vSeat,offer:pcMic.localDescription})});
+    if(!micRes.ok)throw new Error('mic negotiation failed');
+    await pcMic.setRemoteDescription((await micRes.json()).answer);
+    const lisOffer=await pcListen.createOffer();await pcListen.setLocalDescription(lisOffer);await waitIce(pcListen);
+    vSet('negotiating audio…',true);
+    const lisRes=await fetch(vUrls.sdpListen,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({seatId:vSeat,offer:pcListen.localDescription})});
+    if(!lisRes.ok)throw new Error('listen negotiation failed');
+    await pcListen.setRemoteDescription((await lisRes.json()).answer);
+    // Register the uplink adapter only once mic media is ACTUALLY flowing
+    await waitConnected(pcMic);await waitOutbound(pcMic);
+    const ready=await fetch(vUrls.mediaReady,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({seatId:vSeat})});
+    if(!ready.ok)throw new Error('media-ready failed');
+    inVoice=true;vStart=Date.now();vClock=setInterval(vTick,1000);
+    vbtn.textContent='Leave voice';vbtn.disabled=false;
+    vSet('you are live around the fire — the Den Keeper hears you',true);
+    watchMicLevel();
+  }catch(err){
+    leaveVoice('voice failed: '+(err&&err.message||'unknown').slice(0,60)); // drops the seat server-side too
+  }
+}
+function onVoiceCtl(f){
+  if(f.type==='seats'&&inVoice){/* seats shown via chat roster; voice note stays simple */}
+  else if(f.type==='transcript'){
+    if(f.final)addMsg({from:{handle:f.role==='assistant'?'den-keeper':'you (voice)',kind:f.role==='assistant'?'agent':'human'},body:f.text,ts:new Date().toISOString()});
+  }
+  else if(f.type==='warn')vSet('voice den nearing its budget cap — wrapping up soon',true);
+  else if(f.type==='ended')leaveVoice('voice den closed: '+(f.reason||'done'));
+}
+function leaveVoice(note){
+  if(vSeat&&vUrls){try{navigator.sendBeacon(vUrls.leave,JSON.stringify({seatId:vSeat}))}catch{}}
+  teardownVoiceLocal();
+  vSet(note||'left voice — the fire stays lit');
+  if(vbtn){vbtn.textContent='🎙 Join voice';vbtn.disabled=false}
+}
+function teardownVoiceLocal(){
+  inVoice=false;vSeat=null;clearInterval(vClock);vcost.textContent='';
+  try{vCtl&&vCtl.close()}catch{}
+  try{pcMic&&pcMic.close()}catch{}
+  try{pcListen&&pcListen.close()}catch{}
+  try{micStream&&micStream.getTracks().forEach(t=>t.stop())}catch{}
+  try{audioCtx&&audioCtx.close()}catch{}
+  vCtl=pcMic=pcListen=micStream=remoteAudio=audioCtx=null;micDot.className='mic-dot';fire.classList.remove('speaking');
+}
+function waitIce(pc){if(pc.iceGatheringState==='complete')return Promise.resolve();
+  return new Promise((res)=>{const t=setTimeout(done,3000);function done(){clearTimeout(t);pc.removeEventListener('icegatheringstatechange',onC);res()}
+  function onC(){if(pc.iceGatheringState==='complete')done()}pc.addEventListener('icegatheringstatechange',onC)})}
+function waitConnected(pc){if(pc.connectionState==='connected')return Promise.resolve();
+  return new Promise((res,rej)=>{const t0=Date.now();const iv=setInterval(()=>{
+  if(pc.connectionState==='connected'){clearInterval(iv);res()}
+  else if(pc.connectionState==='failed'||Date.now()-t0>10000){clearInterval(iv);rej(new Error('rtc '+pc.connectionState))}},250)})}
+async function waitOutbound(pc){const t0=Date.now();
+  for(;;){const stats=await pc.getStats();let bytes=0;
+  stats.forEach(r=>{if(r.type==='outbound-rtp'&&r.kind==='audio')bytes=r.bytesSent||0});
+  if(bytes>0)return;if(Date.now()-t0>8000)throw new Error('mic media timeout');
+  await new Promise(r=>setTimeout(r,250))}}
+function levelOf(stream){audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)();
+  const src=audioCtx.createMediaStreamSource(stream);const an=audioCtx.createAnalyser();an.fftSize=512;src.connect(an);
+  const buf=new Uint8Array(an.frequencyBinCount);
+  return()=>{an.getByteTimeDomainData(buf);let sum=0;for(let i=0;i<buf.length;i++){const d=(buf[i]-128)/128;sum+=d*d}return Math.sqrt(sum/buf.length)}}
+function watchAiLevel(stream){const level=levelOf(stream);
+  const iv=setInterval(()=>{if(!inVoice){clearInterval(iv);return}
+  fire.classList.toggle('speaking',level()>0.015)},200)}
+function watchMicLevel(){if(!micStream)return;const level=levelOf(micStream);
+  const iv=setInterval(()=>{if(!inVoice){clearInterval(iv);return}
+  micDot.className='mic-dot'+(level()>0.02?' hot':'')},200)}
+if(vbtn)vbtn.addEventListener('click',()=>{if(inVoice)leaveVoice();else joinVoice()});
+window.addEventListener('pagehide',()=>{if(vSeat&&vUrls)navigator.sendBeacon(vUrls.leave,JSON.stringify({seatId:vSeat}))});
 </script>`;
   return layout({ title: den.name, body, identity });
 }

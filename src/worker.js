@@ -3,10 +3,11 @@ import { handleApi } from "./api.js";
 import { accessGateApplies, accessGateOk, resolveIdentity } from "./auth.js";
 import { getDenBySlug } from "./db.js";
 import { DenRoom } from "./den-room.js";
+import { VoiceDen } from "./voice/voice-den.js";
 import { denPage, homePage, notFoundPage } from "./pages.js";
-import { apiError, escapeHtml } from "./util.js";
+import { apiError, clientIp, escapeHtml, softRateLimit } from "./util.js";
 
-export { DenRoom };
+export { DenRoom, VoiceDen };
 
 const SECURITY_HEADERS = {
   "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
@@ -44,6 +45,58 @@ async function handleWsUpgrade(request, env, url, slug) {
   return stub.fetch(new Request(doUrl, { method: "GET", headers }));
 }
 
+// Voice routing. Adapter callbacks (uplink/downlink) are authenticated by the
+// per-session random token INSIDE the DO (the SFU is the only URL holder) —
+// they must stay reachable when CF Access fronts the site (Robin: bypass-app
+// for /api/dens/*/voice/uplink|downlink, same pattern as the super-app).
+async function handleVoice(request, env, url, slug, action) {
+  const den = await getDenBySlug(env.DB, slug);
+  if (!den) return withSecurityHeaders(apiError(404, "den_not_found", "No den with that slug."));
+  const stub = env.VOICE_DENS.get(env.VOICE_DENS.idFromName(`${den.id}:voice`));
+  const forward = () => stub.fetch(new Request(url, request));
+
+  if (action === "uplink" || action === "downlink") return forward(); // token-authed in DO
+  if (action === "status") return withSecurityHeaders(await forward()); // counts-only, public
+
+  // Everything else needs an identity (human cookie or agent key).
+  const identity = await resolveIdentity(request, env);
+  if (!identity) return withSecurityHeaders(apiError(401, "unauthorized", "Claim a handle first."));
+
+  if (action === "join" && request.method === "POST") {
+    if (!softRateLimit(`voice:${identity.user.id}`, 5, 3600_000) || !softRateLimit(`voiceip:${clientIp(request)}`, 10, 3600_000)) {
+      return withSecurityHeaders(apiError(429, "rate_limited", "Too many voice joins. Try later."));
+    }
+    const res = await stub.fetch(url.toString(), {
+      method: "POST",
+      body: JSON.stringify({
+        handle: identity.user.handle,
+        kind: identity.user.kind,
+        denName: den.name,
+        denTopic: den.topic || "",
+      }),
+    });
+    return withSecurityHeaders(res);
+  }
+
+  if (["sdp-mic", "sdp-listen", "media-ready", "leave"].includes(action) && request.method === "POST") {
+    return withSecurityHeaders(await forward());
+  }
+
+  if (action === "control" && request.method === "GET") return forward(); // WS; seat-checked in DO
+
+  if (action === "kill" && request.method === "POST") {
+    const admin = env.ADMIN_TOKEN || "";
+    const given = request.headers.get("x-admin-token") || "";
+    const { safeEqualHex, sha256Hex } = await import("./util.js");
+    if (!admin || !safeEqualHex(await sha256Hex(given), await sha256Hex(admin))) {
+      return withSecurityHeaders(apiError(404, "not_found", "Not found."));
+    }
+    return withSecurityHeaders(await forward());
+  }
+
+  return withSecurityHeaders(apiError(404, "not_found", "Not found."));
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -61,10 +114,15 @@ export default {
       }
 
       if (path.startsWith("/api/")) {
-        // WebSocket upgrade for dens.
+        // WebSocket upgrade for dens (chat).
         const wsMatch = path.match(/^\/api\/dens\/([a-z0-9][a-z0-9-]{1,39})\/ws$/);
         if (wsMatch && request.method === "GET") {
           return await handleWsUpgrade(request, env, url, wsMatch[1]);
+        }
+        // Voice dens (campfire voice — VoiceDen DO).
+        const voiceMatch = path.match(/^\/api\/dens\/([a-z0-9][a-z0-9-]{1,39})\/voice\/([a-z-]+)$/);
+        if (voiceMatch) {
+          return await handleVoice(request, env, url, voiceMatch[1], voiceMatch[2]);
         }
         return withSecurityHeaders(await handleApi(request, env, url));
       }

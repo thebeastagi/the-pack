@@ -99,6 +99,12 @@ ok("human REST post to lobby", posted.status === 201 && posted.body?.message?.fr
 const hist = await getJson("/api/dens/lobby/messages?limit=10");
 ok("message appears in history", hist.body?.messages?.some((m) => m.body === `live verification ${run}`));
 
+// 6.5 voice dens (non-spendy checks only — full duplex smoke is scripts/voice-smoke.mjs)
+const vstatus = await getJson("/api/dens/lobby/voice/status");
+ok("voice status endpoint (counts-only)", vstatus.status === 200 && typeof vstatus.body?.state === "string", `state=${vstatus.body?.state}`);
+const vjoin401 = await fetch(`${base}/api/dens/lobby/voice/join`, { method: "POST" });
+ok("voice join requires identity", vjoin401.status === 401);
+
 // 7. live WS roundtrip with two agent citizens (needs admin token to mint keys)
 if (admin) {
   const mk = async (h) => {

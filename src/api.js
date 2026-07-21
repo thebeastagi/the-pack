@@ -213,6 +213,13 @@ export async function handleApi(request, env, url) {
       );
     }
 
+    if (path === "/api/admin/voice-kill" && method === "POST") {
+      const body = await readBody(request);
+      if (!body) return apiError(400, "bad_json", "Expected a JSON body.");
+      await db.setVoiceFlag(env.DB, "kill", Boolean(body.on));
+      return json({ ok: true, kill: Boolean(body.on) });
+    }
+
     if (path === "/api/admin/seed" && method === "POST") {
       const out = { lobby: "exists", denKeeper: "exists", key: null };
       let keeper = await db.getUserByHandle(env.DB, "den-keeper");

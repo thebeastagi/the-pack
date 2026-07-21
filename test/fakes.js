@@ -5,7 +5,7 @@ import { SQL } from "../src/db.js";
 import { DenRoom } from "../src/den-room.js";
 
 export function createFakeD1() {
-  const t = { users: [], sessions: [], agent_keys: [], dens: [], den_members: [], messages: [] };
+  const t = { users: [], sessions: [], agent_keys: [], dens: [], den_members: [], messages: [], voice_usage: [], voice_flags: [] };
   const clone = (r) => (r ? structuredClone(r) : r);
   const handlers = {
     [SQL.insertUser]: {
@@ -75,6 +75,22 @@ export function createFakeD1() {
           });
       },
     },
+    [SQL.voiceUsageGet]: { first: (a) => clone(t.voice_usage.find((r) => r.day === a[0])) },
+    [SQL.voiceUsageAdd]: {
+      run(a) {
+        const row = t.voice_usage.find((r) => r.day === a[0]);
+        if (row) row.seconds += a[1];
+        else t.voice_usage.push({ day: a[0], seconds: a[1] });
+      },
+    },
+    [SQL.voiceFlagGet]: { first: (a) => clone(t.voice_flags.find((r) => r.k === a[0])) },
+    [SQL.voiceFlagSet]: {
+      run(a) {
+        const row = t.voice_flags.find((r) => r.k === a[0]);
+        if (row) row.v = a[1];
+        else t.voice_flags.push({ k: a[0], v: a[1] });
+      },
+    },
   };
 
   return {
@@ -99,6 +115,10 @@ function makeFakeSocket() {
     closed: null,
     _attachment: null,
     _peer: null,
+    _listeners: {},
+    accept() {},   // non-hibernating accept (VoiceDen adapter/control sockets)
+    addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); },
+    emit(type, event) { for (const fn of this._listeners[type] || []) fn(event); },
     send(data) { this._peer ? this._peer.received.push(data) : this.received.push(data); },
     close(code = 1000, reason = "") { this.closed = { code, reason }; },
     serializeAttachment(a) { this._attachment = structuredClone(a); },
