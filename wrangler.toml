@@ -7,6 +7,7 @@ name = "beast-pack"
 main = "src/worker.js"
 compatibility_date = "2026-07-21"
 workers_dev = true
+preview_urls = false
 
 routes = [
   { pattern = "pack.thebeastagi.com", custom_domain = true },
@@ -27,5 +28,5 @@ new_sqlite_classes = ["DenRoom"]
 [[d1_databases]]
 binding = "DB"
 database_name = "beast-pack-db"
-database_id = "PENDING_CREATE"   # filled by deploy runbook (README §deploy)
+database_id = "1ae5a0ac-2129-4df3-98bf-e13bf9b106ab"
 migrations_dir = "migrations"
