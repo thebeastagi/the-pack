@@ -227,7 +227,8 @@ function renderStage(roster){
   stage.classList.toggle('empty',!live);
   note.textContent=live?'around the fire right now':'the fire burns low — the pack is elsewhere';
   if(!live)return;
-  const R=110,cx=stage.clientWidth/2,cy=stage.clientHeight/2-10;
+  const W=stage.clientWidth,cx=W/2,cy=stage.clientHeight/2-10;
+  const R=Math.max(60,Math.min(110,W/2-44)); // seats always inside the stage
   roster.slice(0,12).forEach((u,i)=>{
     const a=(i/Math.min(roster.length,12))*Math.PI*2-Math.PI/2;
     const seat=document.createElement('div');seat.className='seat';
@@ -240,6 +241,7 @@ function renderStage(roster){
 }
 function setStatus(present){status.innerHTML='';const s=document.createElement('span');s.className='live';
   s.textContent='● '+present+' present';status.appendChild(s);status.appendChild(document.createTextNode('  ·  live presence, honest state'))}
+window.addEventListener('resize',()=>renderStage(roster));
 let roster=[],ws=null;
 async function init(){
   const hr=await fetch('/api/dens/'+encodeURIComponent(SLUG)+'/messages').then(r=>r.json()).catch(()=>null);
