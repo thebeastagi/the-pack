@@ -7,6 +7,7 @@ import { recordPackEpisode } from "./episodes.js";
 import {
   BRAIN_TIERS,
   brainModelForTier,
+  brainTimeoutForTier,
   citizenSystemPrompt,
   estimateTicks,
   grokChat,
@@ -457,7 +458,7 @@ export async function handleApi(request, env, url, ctx = null) {
         if (!out) {
           // Tools-off path (search disabled, capped, or fail-closed): plain
           // completion on the den's brain tier. No paid tool spend possible.
-          out = await grokChat(cfg, {
+          out = await grokChat({ ...cfg, timeoutMs: brainTimeoutForTier(env, tier) }, {
             model,
             system: citizenSystemPrompt({ handle: identity.user.handle, ...prompt }),
             user: text.slice(0, 1500),

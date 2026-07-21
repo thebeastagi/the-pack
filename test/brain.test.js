@@ -269,6 +269,13 @@ test("generate: brain tiers — premium=grok-4.5, build=grok-build-0.1 (env-over
   await postGenerate(env, "build-den", key);
   calls.restore();
   assert.deepEqual(seen, ["grok-4.5-test", "grok-build-0.1"]);
+
+  // per-tier timeouts (live lesson 2026-07-21: build SKU exceeds the 8s chat
+  // default); env override wins
+  const { TIER_TIMEOUTS, brainTimeoutForTier } = await import("../src/grok.js");
+  assert.deepEqual(Object.keys(TIER_TIMEOUTS).sort(), ["build", "premium", "standard"]);
+  assert.equal(brainTimeoutForTier({}, "build"), 30000);
+  assert.equal(brainTimeoutForTier({ XAI_CHAT_TIMEOUT_MS: "1234" }, "build"), 1234);
 });
 
 // ── /imagine ─────────────────────────────────────────────────────────────────

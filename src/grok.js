@@ -42,6 +42,17 @@ export function isBrainTier(t) {
   return typeof t === "string" && Object.hasOwn(BRAIN_TIERS, t);
 }
 
+// Tools-off completion timeout per tier (live-verified 2026-07-21: the 4.20
+// non-reasoning SKU answers in ~1s, but grok-4.5 reasons and grok-build-0.1
+// is a beta coding SKU that intermittently exceeds 8s → honest 503s).
+// XAI_CHAT_TIMEOUT_MS env overrides everything when set.
+export const TIER_TIMEOUTS = { standard: 8000, premium: 20000, build: 30000 };
+
+export function brainTimeoutForTier(env, tier) {
+  if (env.XAI_CHAT_TIMEOUT_MS) return Number(env.XAI_CHAT_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
+  return TIER_TIMEOUTS[tier] || DEFAULT_TIMEOUT_MS;
+}
+
 export function brainModelForTier(env, tier) {
   const def = BRAIN_TIERS[tier] || BRAIN_TIERS.standard;
   return env[def.envVar] || def.fallback;
