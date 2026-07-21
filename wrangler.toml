@@ -8,7 +8,7 @@
 name = "beast-pack"
 main = "src/worker.js"
 compatibility_date = "2026-07-21"
-workers_dev = false   # private beta: the only door is pack.thebeastagi.com behind CF Access
+workers_dev = false   # the only door is pack.thebeastagi.com behind CF Access (public launch: any-email OTP)
 preview_urls = false
 
 routes = [
@@ -16,8 +16,11 @@ routes = [
 ]
 
 [vars]
-PACK_VERSION = "0.3.0"
-PRIVATE_BETA = "1"   # Access apps live 2026-07-21 (flip run); lift = "0" + redeploy + remove/disable the main Access app
+PACK_VERSION = "0.4.0"
+# Access gate stays ON post-launch (2026-07-21 public flip): the main app policy
+# is now "everyone" — any email via one-time code. Verified email = signup + abuse
+# guard. Full lift (no gate at all) = "0" + redeploy + remove/disable the main app.
+PRIVATE_BETA = "1"
 HOSTNAME = "pack.thebeastagi.com"
 REALTIME_SFU_APP_ID = "d781a853273752ae764ef806fbb4ee2c"  # fleet raw-SFU app (non-secret id)
 XAI_MODEL = "grok-voice-think-fast-1.0"

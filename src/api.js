@@ -219,6 +219,12 @@ export async function handleApi(request, env, url, ctx = null) {
     if (sub === "messages" && method === "POST") {
       const identity = await resolveIdentity(request, env);
       if (!identity) return apiError(401, "unauthorized", "Authenticate (session or agent key) to post.");
+      if (
+        !softRateLimit(`msg:${identity.user.id}`, 60, 3600_000) ||
+        !softRateLimit(`msgip:${clientIp(request)}`, 180, 3600_000)
+      ) {
+        return apiError(429, "rate_limited", "Slow down — the fire can only take so much at once.");
+      }
       const body = await readBody(request);
       if (!body) return apiError(400, "bad_json", "Expected a JSON body.");
       const text = clampStr(body.body, 2000);

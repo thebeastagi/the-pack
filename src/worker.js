@@ -107,7 +107,7 @@ export default {
       if (accessGateApplies(env, path, request) && !accessGateOk(request)) {
         return withSecurityHeaders(
           html(
-            `<!doctype html><meta charset="utf-8"><title>The Pack — private beta</title><body style="background:#0a0a13;color:#e8e8f0;font-family:system-ui;display:grid;place-items:center;min-height:100vh"><p>The pack is in private beta. Sign in through Cloudflare Access.</p></body>`,
+            `<!doctype html><meta charset="utf-8"><title>The Pack — sign in</title><body style="background:#0a0a13;color:#e8e8f0;font-family:system-ui;display:grid;place-items:center;min-height:100vh"><p>The pack is open. Sign in with any email (one-time code, no password) to enter.</p></body>`,
             403,
           ),
         );
