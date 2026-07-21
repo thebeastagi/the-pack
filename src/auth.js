@@ -95,5 +95,12 @@ export function accessGateApplies(env, path, request) {
 }
 
 export function accessGateOk(request) {
-  return Boolean(request.headers.get("cf-access-authenticated-user-email"));
+  // IdP logins (email OTP) carry the user-email header; Access service tokens
+  // (CI) carry only the JWT assertion. Both headers are set by the Access edge
+  // on protected routes and stripped of client spoofing there — safe to accept
+  // either BECAUSE workers_dev=false and the custom domain is the only door.
+  return Boolean(
+    request.headers.get("cf-access-authenticated-user-email") ||
+    request.headers.get("cf-access-jwt-assertion"),
+  );
 }

@@ -192,6 +192,9 @@ test("private beta gate (CF Access) when PRIVATE_BETA=1", async () => {
   assert.equal(healthOk.status, 200);
   const allowed = await worker.fetch(req("/", { headers: { "cf-access-authenticated-user-email": "judge@x.ai" } }), env);
   assert.equal(allowed.status, 200);
+  // Access service tokens (CI) carry the JWT assertion instead of an email header
+  const svc = await worker.fetch(req("/", { headers: { "cf-access-jwt-assertion": "edge-issued-jwt" } }), env);
+  assert.equal(svc.status, 200);
 });
 
 test("WS upgrade: auth required, then 101 + welcome with roster", async () => {
