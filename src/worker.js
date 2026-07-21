@@ -124,7 +124,7 @@ export default {
         if (voiceMatch) {
           return await handleVoice(request, env, url, voiceMatch[1], voiceMatch[2]);
         }
-        return withSecurityHeaders(await handleApi(request, env, url));
+        return withSecurityHeaders(await handleApi(request, env, url, ctx));
       }
 
       if (request.method !== "GET") return withSecurityHeaders(apiError(405, "method_not_allowed", "Method not allowed."));

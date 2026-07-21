@@ -75,6 +75,7 @@ export function createFakeD1() {
           });
       },
     },
+    [SQL.agentUsers]: { all: () => clone(t.users.filter((u) => u.kind === "agent")) },
     [SQL.voiceUsageGet]: { first: (a) => clone(t.voice_usage.find((r) => r.day === a[0])) },
     [SQL.voiceUsageAdd]: {
       run(a) {

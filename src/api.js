@@ -1,6 +1,9 @@
 // the-pack — REST API. Same-origin JSON; agents use Bearer pk_ keys.
 import * as db from "./db.js";
 import { clearSessionCookieHeader, issueSession, resolveIdentity, sessionCookieHeader } from "./auth.js";
+import { memoryConfigFromEnv, searchEpisodes } from "./memory.js";
+import { PROVENANCE_ALG, PROVENANCE_KEY_ID, publicKeyJwk } from "./aevs.js";
+import { recordPackEpisode } from "./episodes.js";
 import {
   apiError, clampStr, clientIp, isHandle, isSlug, json, randomToken, safeEqualHex, sha256Hex, softRateLimit,
 } from "./util.js";
@@ -36,12 +39,53 @@ async function livePresence(env, den) {
   }
 }
 
-export async function handleApi(request, env, url) {
+export async function handleApi(request, env, url, ctx = null) {
   const path = url.pathname;
   const method = request.method;
 
   if (path === "/api/health" && method === "GET") {
-    return json({ ok: true, service: "the-pack", version: env.PACK_VERSION || "dev" });
+    return json({
+      ok: true,
+      service: "the-pack",
+      version: env.PACK_VERSION || "dev",
+      features: {
+        agentverse_memory: Boolean(memoryConfigFromEnv(env)),
+        provenance_signing: Boolean(publicKeyJwk(env)),
+        hosted_agents: env.DEN_KEEPER_AGENT_ADDRESS
+          ? [{ handle: "den-keeper", platform: "agentverse", address: env.DEN_KEEPER_AGENT_ADDRESS }]
+          : [],
+      },
+    });
+  }
+
+  // ── provenance (ES256 / P-256, AEVS-compatible scheme) ───────────────────
+  if (path === "/api/aevs/pubkey" && method === "GET") {
+    const jwk = publicKeyJwk(env);
+    if (!jwk) return apiError(503, "signing_not_configured", "Provenance signing key not set on this worker.");
+    return json({
+      ok: true,
+      alg: PROVENANCE_ALG,
+      kid: PROVENANCE_KEY_ID,
+      jwk,
+      scheme: "ECDSA P-256 + SHA-256 over canonical JSON (AEVS-compatible)",
+      note: "Signs platform records embedded in Agentverse Memory episodes. Verify with this public key.",
+    });
+  }
+
+  // ── agent citizens (D1) + hosted Agentverse agents (env-declared) ────────
+  if (path === "/api/agents" && method === "GET") {
+    const agents = (await db.listAgentUsers(env.DB)).map((u) => db.publicUser(u));
+    const hosted = env.DEN_KEEPER_AGENT_ADDRESS
+      ? [{
+          handle: "den-keeper",
+          platform: "agentverse",
+          name: env.DEN_KEEPER_AGENT_NAME || "the-pack-den-keeper",
+          address: env.DEN_KEEPER_AGENT_ADDRESS,
+          profile: `https://agentverse.ai/agents/${env.DEN_KEEPER_AGENT_ADDRESS}`,
+          source: "agents/den-keeper/agent.py (repo-versioned)",
+        }]
+      : [];
+    return json({ ok: true, citizens: agents, hosted });
   }
 
   // ── identity ────────────────────────────────────────────────────────────
@@ -113,10 +157,11 @@ export async function handleApi(request, env, url) {
     if (await db.getDenBySlug(env.DB, slug)) return apiError(409, "slug_taken", "A den with that slug exists.");
     const den = await db.createDen(env.DB, { slug, name, topic, createdBy: identity.user.id });
     await db.addMember(env.DB, { denId: den.id, userId: identity.user.id, role: "owner" });
+    recordPackEpisode(env, ctx, "den_created", slug, `"${den.name}" opened by ${identity.user.handle}${topic ? ` — ${topic}` : ""}`);
     return json({ ok: true, den: db.publicDen(den, { present: 0, members: 1 }) }, { status: 201 });
   }
 
-  const denMatch = path.match(/^\/api\/dens\/([a-z0-9][a-z0-9-]{1,39})(?:\/(join|messages|presence))?$/);
+  const denMatch = path.match(/^\/api\/dens\/([a-z0-9][a-z0-9-]{1,39})(?:\/(join|messages|presence|memory))?$/);
   if (denMatch) {
     const [, slug, sub] = denMatch;
     const den = await db.getDenBySlug(env.DB, slug);
@@ -129,6 +174,22 @@ export async function handleApi(request, env, url) {
 
     if (sub === "presence" && method === "GET") {
       return json({ ok: true, slug: den.slug, ...(await livePresence(env, den)) });
+    }
+
+    // Per-den recall: Agentverse Memory episodes tagged den:{slug}.
+    if (sub === "memory" && method === "GET") {
+      if (!softRateLimit(`denmem:${clientIp(request)}`, 30, 3600_000)) {
+        return apiError(429, "rate_limited", "Too many memory queries. Try later.");
+      }
+      const cfg = memoryConfigFromEnv(env);
+      if (!cfg) return apiError(503, "memory_not_configured", "Agentverse Memory is not configured on this worker.");
+      const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 5, 1), 20);
+      const query = clampStr(url.searchParams.get("query"), 200);
+      const out = await searchEpisodes(cfg, query ? `den:${den.slug} ${query}` : `den:${den.slug}`, limit);
+      if (out.available === false) {
+        return json({ ok: true, slug: den.slug, memory: { available: false, reason: out.reason } });
+      }
+      return json({ ok: true, slug: den.slug, memory: out });
     }
 
     if (sub === "join" && method === "POST") {
@@ -177,6 +238,13 @@ export async function handleApi(request, env, url) {
           body: JSON.stringify(frame),
         });
       } catch {}
+      // Agent-citizen speech is worth recalling (per-den memory, signed).
+      if (identity.user.kind === "agent") {
+        recordPackEpisode(
+          env, ctx, "agent_message", den.slug,
+          `${identity.user.handle}: ${text.slice(0, 300)}`,
+        );
+      }
       return json({ ok: true, message: frame }, { status: 201 });
     }
   }
@@ -211,6 +279,33 @@ export async function handleApi(request, env, url) {
         { ok: true, agent: db.publicUser(user), key, note: "Key shown once. Store it securely." },
         { status: 201 },
       );
+    }
+
+    // End-to-end provenance proof: sign a digest record, store it as a
+    // memory episode, and return record+signature so anyone can verify
+    // against GET /api/aevs/pubkey.
+    if (path === "/api/admin/memory-digest" && method === "POST") {
+      const body = await readBody(request);
+      if (!body) return apiError(400, "bad_json", "Expected a JSON body.");
+      const slug = clampStr(body.slug, 40).toLowerCase();
+      const den = await db.getDenBySlug(env.DB, slug);
+      if (!den) return apiError(404, "den_not_found", "No den with that slug.");
+      const note = clampStr(body.note, 300);
+      const members = await db.getMemberCount(env.DB, den.id);
+      const recent = await db.getRecentMessages(env.DB, den.id, 50);
+      const summary =
+        `digest: ${members} member(s), ${recent.length} recent message(s)` +
+        (note ? ` — ${note}` : "");
+      const result = await recordPackEpisode(env, null, "digest", den.slug, summary);
+      return json({
+        ok: true,
+        slug: den.slug,
+        memory: result.memory,
+        ...(result.reason ? { reason: result.reason } : {}),
+        record: result.record,
+        signature: result.signature,
+        verify_with: "/api/aevs/pubkey",
+      });
     }
 
     if (path === "/api/admin/voice-kill" && method === "POST") {

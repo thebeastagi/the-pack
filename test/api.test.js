@@ -33,7 +33,12 @@ test("health", async () => {
   const res = await worker.fetch(req("/api/health"), env);
   const body = await res.json();
   assert.equal(res.status, 200);
-  assert.deepEqual(body, { ok: true, service: "the-pack", version: "test" });
+  assert.deepEqual(body, {
+    ok: true,
+    service: "the-pack",
+    version: "test",
+    features: { agentverse_memory: false, provenance_signing: false, hosted_agents: [] },
+  });
 });
 
 test("home page renders with brand + security headers", async () => {

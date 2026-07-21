@@ -16,11 +16,20 @@ routes = [
 ]
 
 [vars]
-PACK_VERSION = "0.2.0"
+PACK_VERSION = "0.3.0"
 PRIVATE_BETA = "1"   # Access apps live 2026-07-21 (flip run); lift = "0" + redeploy + remove/disable the main Access app
 HOSTNAME = "pack.thebeastagi.com"
 REALTIME_SFU_APP_ID = "d781a853273752ae764ef806fbb4ee2c"  # fleet raw-SFU app (non-secret id)
 XAI_MODEL = "grok-voice-think-fast-1.0"
+# Phase 2.7 — Agentverse Memory + provenance + hosted agents (non-secret config;
+# AM_API_KEY + PACK_SIGNING_KEY_JWK stay `wrangler secret put` only).
+AM_BASE_URL = "https://am-server-jbneh74b5q-uc.a.run.app"
+AM_AGENT_ID = "beast-engineer"   # memory namespace owner (server rejects id ≠ key owner); episodes tagged source="the-pack"
+AM_SPACE_ID = "the-beast-hive"
+DEN_KEEPER_AGENT_NAME = "the-pack-den-keeper-3"
+DEN_KEEPER_AGENT_ADDRESS = "agent1qthrcpqjy9kk488u3s0ay24lwgtuzjkhq3apkaamwv8p8e8k4s53v65k63a"
+# Public half of the pack provenance keypair (private half = PACK_SIGNING_KEY_JWK secret).
+PACK_SIGNING_PUB_JWK = '{"kty":"EC","crv":"P-256","x":"OkwWA8iIsDuOU0Vnsk9a1FJT-kBiczZZrRMYP9dS8OI","y":"aixbeRC7PhinQUFSR1AJLIRzPrrVO6pDlOG08Z6VGek"}'
 
 [[durable_objects.bindings]]
 name = "DEN_ROOMS"

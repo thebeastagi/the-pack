@@ -23,6 +23,7 @@ import {
   PACER_FRAME_MS, SFU_RATE, SFU_CHANNELS, SFU_WS_CHUNK_BYTES, WRAP_UP_TEXT, XAI_RATE, XAI_CHANNELS, XAI_REALTIME_URL,
 } from "./config.js";
 import { CostGuard, DailyCap, GuardStatus, KillReason } from "./costguard.js";
+import { recordPackEpisode } from "../episodes.js";
 import { DownlinkPacer } from "./pacer.js";
 import { Chunker, frameBytes, mixMono, monoToStereo, stereoToMono } from "./pcm.js";
 import { decodePacket, encodeIngestFrame } from "./packet.js";
@@ -714,13 +715,26 @@ export class VoiceDen {
     this.xai = this.downlink = null;
 
     // Daily-cap accounting (counts-only, D1)
+    let closedElapsedS = 0;
     if (this.guard) {
       const cap = new DailyCap(DAILY_CAP_MINUTES * 60);
-      const elapsed = Math.round(this.guard.elapsedS(this.now()));
+      closedElapsedS = Math.round(this.guard.elapsedS(this.now()));
       try {
-        await db.addVoiceUsage(this.env.DB, cap.key, elapsed);
+        await db.addVoiceUsage(this.env.DB, cap.key, closedElapsedS);
       } catch {}
     }
+
+    // Agentverse Memory episode (ES256-signed; counts-only — NO audio/transcripts).
+    try {
+      recordPackEpisode(
+        this.env,
+        this.ctx,
+        "voice_session",
+        this.denSlug || "unknown",
+        `${closedElapsedS}s campfire voice, reason=${reason}, seats_at_close=${this.seats.size}, ` +
+          `up=${this.counts.upBytes}B down=${this.counts.downBytes}B`,
+      );
+    } catch {}
 
     const FAILED = new Set([KillReason.XAI_ERROR, KillReason.BILLING_ERROR, KillReason.AUTH_ERROR, KillReason.ADAPTER_LOST]);
     this.state = FAILED.has(reason) ? "failed" : "closed";

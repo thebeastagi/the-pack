@@ -32,6 +32,8 @@ export const SQL = {
   recentMessages:
     "SELECT m.id, m.body, m.created_at, u.handle, u.display_name, u.kind FROM messages m JOIN users u ON u.id = m.user_id WHERE m.den_id = ? ORDER BY m.created_at DESC LIMIT ?",
 
+  agentUsers: "SELECT * FROM users WHERE kind = 'agent' ORDER BY created_at ASC LIMIT 100",
+
   voiceUsageGet: "SELECT seconds FROM voice_usage WHERE day = ?",
   voiceUsageAdd:
     "INSERT INTO voice_usage (day, seconds) VALUES (?, ?) ON CONFLICT(day) DO UPDATE SET seconds = seconds + excluded.seconds",
@@ -142,6 +144,12 @@ export async function getRecentMessages(db, denId, limit = 50) {
 // ── den artwork: bytes live in R2 (phase 2.6); D1 only marks presence ──
 export async function markDenArt(db, denId, artUrl) {
   await db.prepare(SQL.denSetArtUrl).bind(artUrl, denId).run();
+}
+
+// ── agent citizens (kind='agent') ───────────────────────────────────────────
+export async function listAgentUsers(db) {
+  const res = await db.prepare(SQL.agentUsers).all();
+  return res.results || [];
 }
 
 // ── voice dens (counts-only; NO audio ever persisted) ──────────────────────

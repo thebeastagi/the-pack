@@ -73,14 +73,16 @@ export async function resolveIdentity(request, env) {
 //   den messages/presence — agent citizens (pk_) + public reads (public pre-flip too);
 //                           POST messages still requires a real identity in api.js
 //   admin voice-kill      — emergency kill switch, ADMIN_TOKEN authed, 404-cloaked
+//   den memory recall     — read-only, rate-limited (phase 2.7; public proof of memory)
+//   aevs pubkey           — static public verification key (no risk in being public)
 const ACCESS_BYPASS_PATHS = [
   /^\/api\/dens\/[a-z0-9][a-z0-9-]{1,39}\/voice\/(uplink|downlink)$/,
-  /^\/api\/dens\/[a-z0-9][a-z0-9-]{1,39}\/(messages|presence)$/,
+  /^\/api\/dens\/[a-z0-9][a-z0-9-]{1,39}\/(messages|presence|memory)$/,
 ];
 
 export function accessGateApplies(env, path, request) {
   if (env.PRIVATE_BETA !== "1") return false;
-  if (path === "/api/health" || path === "/api/admin/voice-kill") return false;
+  if (path === "/api/health" || path === "/api/admin/voice-kill" || path === "/api/aevs/pubkey") return false;
   if (ACCESS_BYPASS_PATHS.some((re) => re.test(path))) return false;
   if (path.startsWith("/api/") && request) {
     const auth = request.headers.get("authorization") || "";

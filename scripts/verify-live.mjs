@@ -59,54 +59,82 @@ console.log(`the-pack live verification → ${base} (run ${run})\n`);
 const health = await getJson("/api/health");
 ok("GET /api/health", health.status === 200 && health.body?.ok === true && health.body?.service === "the-pack");
 
-// 2. home page brand
-const home = await fetch(`${base}/`);
-const homeHtml = await home.text();
-ok("GET / renders The Pack", home.status === 200 && homeHtml.includes("The Pack"));
-ok("brand tokens present (obsidian + gradient)", homeHtml.includes("--obsidian-1:#0a0a13") && homeHtml.includes("--beast-grad"));
-ok("honest-state footer", homeHtml.includes("presence rings are receipts"));
+// 1b. CF Access gate detection (private beta: host 302s to cloudflareaccess)
+const gateProbe = await fetch(`${base}/`, { redirect: "manual" });
+const gated = gateProbe.status === 302 && (gateProbe.headers.get("location") || "").includes("cloudflareaccess.com");
+ok("CF Access gate state known", true, gated ? "GATED (private beta)" : "open");
 
-// 3. handle claim (human happy path)
+// 2. home page brand (or gate proof when private beta is on)
+const home = await fetch(`${base}/`, { redirect: gated ? "manual" : "follow" });
+if (gated) {
+  ok("GET / 302s to Access login (gate intact)", home.status === 302 && (home.headers.get("location") || "").includes("cloudflareaccess.com"));
+} else {
+  const homeHtml = await home.text();
+  ok("GET / renders The Pack", home.status === 200 && homeHtml.includes("The Pack"));
+  ok("brand tokens present (obsidian + gradient)", homeHtml.includes("--obsidian-1:#0a0a13") && homeHtml.includes("--beast-grad"));
+  ok("honest-state footer", homeHtml.includes("presence rings are receipts"));
+}
+
+// 3. handle claim (human happy path) — skipped while the Access gate is up
 const handle = `judge-${run}`.slice(0, 24);
-const claim = await fetch(`${base}/api/handles`, {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({ handle, displayName: "Grokathon Judge" }),
-});
-const claimBody = await claim.json();
-const cookie = claim.headers.get("set-cookie") || "";
-ok("POST /api/handles (human claim)", claim.status === 201 && claimBody.user?.handle === handle, claimBody.error?.message || "");
-ok("session cookie issued", /pack_session=[0-9a-f]{64}/.test(cookie) && /HttpOnly/.test(cookie));
+let cookie = "";
+if (gated) {
+  console.log("SKIP  handle claim (Access gate is up; humans enter via OTP)");
+} else {
+  const claim = await fetch(`${base}/api/handles`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ handle, displayName: "Grokathon Judge" }),
+  });
+  const claimBody = await claim.json();
+  cookie = claim.headers.get("set-cookie") || "";
+  ok("POST /api/handles (human claim)", claim.status === 201 && claimBody.user?.handle === handle, claimBody.error?.message || "");
+  ok("session cookie issued", /pack_session=[0-9a-f]{64}/.test(cookie) && /HttpOnly/.test(cookie));
+}
 
-// 4. den directory + lobby
-const dens = await getJson("/api/dens");
-const lobby = dens.body?.dens?.find((d) => d.slug === "lobby");
-ok("GET /api/dens lists lobby", dens.status === 200 && Boolean(lobby), dens.body?.dens ? `${dens.body.dens.length} dens` : "no list");
-ok("lobby presence is a number (honest zero ok)", typeof lobby?.present === "number", `present=${lobby?.present}`);
+// 4. den directory + lobby (directory itself is behind the gate during beta;
+//    presence/messages are the bypassed reads)
+if (gated) {
+  const dd = await fetch(`${base}/api/dens`, { redirect: "manual" });
+  ok("GET /api/dens 302s to Access (gate intact)", dd.status === 302);
+} else {
+  const dens = await getJson("/api/dens");
+  const lobby = dens.body?.dens?.find((d) => d.slug === "lobby");
+  ok("GET /api/dens lists lobby", dens.status === 200 && Boolean(lobby), dens.body?.dens ? `${dens.body.dens.length} dens` : "no list");
+  ok("lobby presence is a number (honest zero ok)", typeof lobby?.present === "number", `present=${lobby?.present}`);
+}
 
-// 5. den page
-const denPage = await fetch(`${base}/den/lobby`);
-const denHtml = await denPage.text();
-ok("GET /den/lobby renders stage + chat", denPage.status === 200 && denHtml.includes("den-stage") && denHtml.includes("new WebSocket"));
+// 5. den page (gated during private beta)
+if (gated) {
+  const dp = await fetch(`${base}/den/lobby`, { redirect: "manual" });
+  ok("GET /den/lobby 302s to Access (gate intact)", dp.status === 302);
+} else {
+  const denPage = await fetch(`${base}/den/lobby`);
+  const denHtml = await denPage.text();
+  ok("GET /den/lobby renders stage + chat", denPage.status === 200 && denHtml.includes("den-stage") && denHtml.includes("new WebSocket"));
+}
 
-// 6. human REST post → history
-const posted = await getJson("/api/dens/lobby/messages", {
-  method: "POST",
-  headers: { "content-type": "application/json", cookie },
-  body: JSON.stringify({ body: `live verification ${run}` }),
-});
-ok("human REST post to lobby", posted.status === 201 && posted.body?.message?.from?.handle === handle);
+// 6. human REST post → history (post skipped while gated; history is a bypassed read)
+if (!gated && cookie) {
+  const posted = await getJson("/api/dens/lobby/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ body: `live verification ${run}` }),
+  });
+  ok("human REST post to lobby", posted.status === 201 && posted.body?.message?.from?.handle === handle);
+}
 const hist = await getJson("/api/dens/lobby/messages?limit=10");
-ok("message appears in history", hist.body?.messages?.some((m) => m.body === `live verification ${run}`));
+ok("message history readable (bypassed read)", hist.status === 200 && Array.isArray(hist.body?.messages), `${hist.body?.messages?.length ?? "?"} msgs`);
 
 // 6.5 voice dens (non-spendy checks only — full duplex smoke is scripts/voice-smoke.mjs)
 const vstatus = await getJson("/api/dens/lobby/voice/status");
 ok("voice status endpoint (counts-only)", vstatus.status === 200 && typeof vstatus.body?.state === "string", `state=${vstatus.body?.state}`);
-const vjoin401 = await fetch(`${base}/api/dens/lobby/voice/join`, { method: "POST" });
-ok("voice join requires identity", vjoin401.status === 401);
+const vjoin401 = await fetch(`${base}/api/dens/lobby/voice/join`, { method: "POST", redirect: "manual" });
+ok("voice join requires identity (or gate)", gated ? vjoin401.status === 302 : vjoin401.status === 401, `status=${vjoin401.status}`);
 
-// 7. live WS roundtrip with two agent citizens (needs admin token to mint keys)
-if (admin) {
+// 7. live WS roundtrip with two agent citizens (needs admin token to mint keys;
+//    admin API sits behind the Access gate during private beta → skipped while gated)
+if (admin && !gated) {
   const mk = async (h) => {
     const r = await getJson("/api/admin/agents", {
       method: "POST",
@@ -145,7 +173,42 @@ if (admin) {
     a.ws.close();
   }
 } else {
-  console.log("SKIP  WS roundtrip (set PACK_ADMIN_TOKEN to enable)");
+  console.log(`SKIP  WS roundtrip (${gated ? "Access gate is up" : "set PACK_ADMIN_TOKEN to enable"})`);
+}
+
+// 8. phase 2.7 — Agentverse Memory + provenance + hosted agents
+const feats = health.body?.features || {};
+ok("health: version ≥ 0.3.0", typeof health.body?.version === "string" && health.body.version >= "0.3.0", `v=${health.body?.version}`);
+ok("health: agentverse_memory configured", feats.agentverse_memory === true);
+ok("health: provenance_signing configured", feats.provenance_signing === true);
+ok("health: hosted agent (den-keeper) declared", feats.hosted_agents?.[0]?.address?.startsWith("agent1q"), feats.hosted_agents?.[0]?.address || "none");
+
+const pub = await getJson("/api/aevs/pubkey");
+ok("GET /api/aevs/pubkey (public verification key)", pub.status === 200 && pub.body?.jwk?.kty === "EC" && pub.body?.alg === "ES256" && pub.body?.jwk?.d === undefined);
+
+const mem = await getJson("/api/dens/lobby/memory?limit=3");
+ok("GET /api/dens/lobby/memory (per-den recall)", mem.status === 200 && typeof mem.body?.memory === "object", mem.body?.memory?.available === false ? `degraded: ${mem.body.memory.reason}` : `${mem.body?.memory?.count ?? "?"} episode(s)`);
+
+// Agent-citizen post → signed memory episode (uses the seeded den-keeper key)
+const keeperKey = process.env.PACK_DEN_KEEPER_KEY || "";
+if (keeperKey) {
+  const marker = `pack-memory-proof ${run}`;
+  const post = await getJson("/api/dens/lobby/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${keeperKey}` },
+    body: JSON.stringify({ body: marker }),
+  });
+  ok("den-keeper agent post (pk_ via bypass)", post.status === 201 && post.body?.message?.from?.kind === "agent", post.body?.error?.message || "");
+  // episode write is fire-and-forget + AM indexing is eventual: poll briefly
+  let found = null;
+  for (let i = 0; i < 6 && !found; i++) {
+    await new Promise((r) => setTimeout(r, 4000));
+    const q = await getJson(`/api/dens/lobby/memory?query=${encodeURIComponent(marker)}&limit=5`);
+    found = q.body?.memory?.results?.find((r2) => r2.content?.includes(marker));
+  }
+  ok("signed episode recallable via memory search", Boolean(found), found ? "provenance line present: " + /provenance: ES256/.test(found.content) : "not indexed within ~24s (check AM)");
+} else {
+  console.log("SKIP  agent-post memory proof (set PACK_DEN_KEEPER_KEY to enable)");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

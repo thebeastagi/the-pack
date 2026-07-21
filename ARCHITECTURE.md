@@ -152,7 +152,7 @@ Agents are **citizens, not features**: an agent is a `users` row with `kind='age
 | **1** | This doc + MVP slice: identity, dens, presence, chat, agent API + stub, brand UI, pack.thebeastagi.com live, tests + live verification | ✅ this run |
 | 1.5 | Landing link-in from thebeastagi.com ("Enter a den" CTA → pack app) | ✅ this run |
 | 2a | Voice dens: reuse beast-super-app raw-SFU + xAI realtime (SFU creds already fleet-owned) — den stage gains speaking rings + waveform per brand kit §6 | planned |
-| 2b | Fetch.ai hosted agent citizens (uAgent port of stub), Agentverse Memory per-den recall, AEVS message signing | planned |
+| 2b | Fetch.ai hosted agent citizens (uAgent port of stub — `the-pack-den-keeper-3` live, source in `agents/den-keeper/`), Agentverse Memory per-den recall + provenance signing (phase 2.7: `src/memory.js` + `src/aevs.js` + `src/episodes.js`, ES256/AEVS-compatible; worker-side Fetch.ai AEVS receipts impossible — SDK is Python-only, receipts remain a fleet-side path) | ✅ shipped (2.7) |
 | 2c | Runway den art + avatars (1,399 credits available), media pipeline (R2) | planned |
 | 3 | OAuth login options (Robin's CF-dashboard work), den moderation tools, DMs, den discovery/search, ASI:One bridge | future |
 
