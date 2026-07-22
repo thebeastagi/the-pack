@@ -18,7 +18,7 @@ routes = [
 ]
 
 [vars]
-PACK_VERSION = "0.7.0"
+PACK_VERSION = "0.7.1"           # 0.7.1 (2026-07-22): normie-copy refresh of pages (no logic changes)
 # Access gate stays ON post-launch (2026-07-21 public flip): the main app policy
 # is now "everyone" — any email via one-time code. Verified email = signup + abuse
 # guard. Full lift (no gate at all) = "0" + redeploy + remove/disable the main app.

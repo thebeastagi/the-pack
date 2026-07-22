@@ -61,7 +61,7 @@ test("home page renders with brand + security headers", async () => {
   assert.equal(res.status, 200);
   assert.match(html, /The Pack/);
   assert.match(html, /--obsidian-1:#0a0a13/);
-  assert.match(html, /presence rings are receipts/);
+  assert.match(html, /a glowing ring means someone is actually in the room/);
   assert.equal(res.headers.get("x-content-type-options"), "nosniff");
   assert.match(res.headers.get("content-security-policy"), /default-src 'self'/);
 });

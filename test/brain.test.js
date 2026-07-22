@@ -412,8 +412,8 @@ test("pages: creation form exposes brain controls; den page shows brain + /imagi
   const cookie = await claimHuman(env, "page-wolf");
   const home = await (await worker.fetch(req("/", { headers: { cookie } }), env)).text();
   assert.match(home, /name="brainTier"/);
-  assert.match(home, /Grok 4\.5 — premium/);
-  assert.match(home, /live web \+ X search for den brains/);
+  assert.match(home, /Premium — Grok 4\.5/);
+  assert.match(home, /let the room's AI search the live web and X/);
 
   await worker.fetch(
     req("/api/dens", { method: "POST", headers: { ...jsonHeaders, cookie }, body: JSON.stringify({ slug: "prem-view", brainTier: "premium" }) }),
