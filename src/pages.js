@@ -2,6 +2,7 @@
 // (obsidian scale, violet→cyan gradient, den-fire reserved, honest presence).
 import { authMode } from "./auth.js";
 import { turnstileIsTestKeys, turnstileSiteKey } from "./auth-native.js";
+import { emailStatus } from "./email.js";
 import { escapeHtml } from "./util.js";
 
 const CSS = `
@@ -205,12 +206,18 @@ export function homePage(identity, env = {}) {
   const tsTestBanner = turnstileIsTestKeys(env)
     ? `<p style="color:var(--warn,#e0a458);font:600 12px/16px var(--font-m);border:1px dashed var(--warn,#e0a458);border-radius:8px;padding:8px 10px;margin-bottom:12px">⚠️ TEST MODE — Turnstile is running Cloudflare's documented always-pass TEST keys. Dev/preview only, not real bot protection.</p>`
     : "";
+  // Same loud-self-identification pattern for the email sender: whenever
+  // codes land in the dev outbox (stub provider OR armed stub fallback),
+  // say so on the page — nobody should wait for real mail that can't come.
+  const devMailBanner = /stub/i.test(emailStatus(env))
+    ? `<p style="color:var(--warn,#e0a458);font:600 12px/16px var(--font-m);border:1px dashed var(--warn,#e0a458);border-radius:8px;padding:8px 10px;margin-bottom:12px">⚠️ DEV MAIL MODE — sign-in codes land in the dev outbox, not a real inbox (preview only; real sending starts when the domain is onboarded to Cloudflare Email Service).</p>`
+    : "";
   const gate =
     native && !identity
       ? `<div class="card" id="gate">
        <h2 class="sec" style="margin-top:0">Enter the pack</h2>
        <p style="color:var(--text-muted);font-size:14px;margin-bottom:12px">No passwords. Type your email, we send a one-time code, you're in — new or returning, same door.</p>
-       ${tsTestBanner}
+       ${tsTestBanner}${devMailBanner}
        <form id="otp-start" class="grid" style="gap:12px">
          <div><label for="ge">email</label><input id="ge" name="email" type="email" required maxlength="120" placeholder="you@example.com" autocomplete="email"></div>
          <div class="cf-turnstile" data-sitekey="${escapeHtml(tsSiteKey)}"></div>

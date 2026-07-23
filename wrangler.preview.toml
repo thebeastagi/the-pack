@@ -20,16 +20,25 @@ routes = [
 ]
 
 [vars]
-PACK_VERSION = "0.9.0-preview-native-auth"  # M1 (2026-07-23): Workers-native email-OTP auth behind AUTH_MODE flag
+PACK_VERSION = "0.9.1-preview-cf-email"  # M1+ (2026-07-23): native OTP auth + Cloudflare Email Service sender
 # ── native auth (M1, PREVIEW-ONLY posture) ─────────────────────────────────
 # AUTH_MODE: "access" (default when absent — prod behavior) | "native".
 # Preview runs native; the Access edge app on pack-preview stays UP, so the
 # public still can't reach signup — E2E enters via the-pack-ci service token.
 AUTH_MODE = "native"
-# Stub sender: OTP "mail" lands in D1 dev_outbox (read via admin dev-mail
-# endpoint). Real provider = Robin decision R1; flip is EMAIL_PROVIDER +
-# `wrangler secret put EMAIL_API_KEY` + EMAIL_FROM. Stub sends NO real email.
-EMAIL_PROVIDER = "stub"
+# OTP sender = Cloudflare Email Service (Robin's pick, 2026-07-23): the
+# [[send_email]] binding below + EMAIL_FROM. NO API keys, NO secrets. The
+# sending domain is NOT onboarded yet (Robin picks it → BEAST-AGI runs the
+# DNS/onboarding checklist in CF-EMAIL-SENDER.md), so runtime sends fail
+# (E_SENDER_NOT_VERIFIED / E_SENDER_DOMAIN_NOT_AVAILABLE) and — ONLY because
+# EMAIL_STUB_FALLBACK=1 below — drop into the D1 dev_outbox, loudly flagged
+# in /api/health and by the login page's DEV MAIL banner.
+# ⚠️ PROD RULE: never set EMAIL_STUB_FALLBACK on prod. Without it the sender
+# fail-closes (503 on /api/auth/start) instead of silently eating codes.
+EMAIL_PROVIDER = "cloudflare"
+EMAIL_FROM = "no-reply@thebeastagi.com"   # CANDIDATE from address — final = Robin's domain choice
+EMAIL_FROM_NAME = "The Pack"
+EMAIL_STUB_FALLBACK = "1"                 # PREVIEW-ONLY escape hatch (see above)
 # Cloudflare's DOCUMENTED always-pass TEST keys (developers.cloudflare.com/
 # turnstile/troubleshooting/testing/). These are public constants, NOT secrets
 # — which is the only reason a *_SECRET_KEY may live in this file. The real
@@ -101,6 +110,12 @@ new_sqlite_classes = ["DenRoom"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["VoiceDen"]
+
+# Cloudflare Email Service (Email Sending, public beta) — native OTP sender.
+# No domain restriction here; sender identity is enforced by the platform
+# (from-domain must be onboarded in Compute > Email Service > Email Sending).
+[[send_email]]
+name = "EMAIL"
 
 [[d1_databases]]
 binding = "DB"

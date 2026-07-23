@@ -421,6 +421,116 @@ test("dev-mail: stub-only, admin-gated, returns the mail for one email", async (
   }
 });
 
+// ── Cloudflare Email Service provider (send_email binding) ─────────────────
+const CF_BASE = {
+  AUTH_MODE: "native",
+  EMAIL_PROVIDER: "cloudflare",
+  EMAIL_FROM: "gate@pack.test",
+  EMAIL_FROM_NAME: "The Pack",
+  TURNSTILE_SITE_KEY: TEST_SITE_KEY,
+  TURNSTILE_SECRET_KEY: TEST_SECRET_KEY,
+};
+
+/** Fake send_email binding. behavior: "ok" | "unverified" (throws with .code). */
+function fakeEmailBinding(behavior = "ok") {
+  const sent = [];
+  return {
+    sent,
+    async send(msg) {
+      sent.push(msg);
+      if (behavior === "ok") return { messageId: `cf-msg-${sent.length}` };
+      const err = new Error("sender domain not verified");
+      err.code = "E_SENDER_NOT_VERIFIED";
+      throw err;
+    },
+  };
+}
+
+test("cloudflare provider: start sends a structured message through the binding (no dev outbox), and the code verifies", async () => {
+  const sv = stubSiteverify();
+  try {
+    const EMAILB = fakeEmailBinding("ok");
+    const env = makeEnv({ ...CF_BASE, EMAIL: EMAILB });
+    const email = "cfwolf@example.net";
+    const res = await worker.fetch(startReq(email), env);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true, sent: true });
+    // exactly one binding send; correct structured fields; the platform does the MIME
+    assert.equal(EMAILB.sent.length, 1);
+    const msg = EMAILB.sent[0];
+    assert.equal(msg.to, email);
+    assert.deepEqual(msg.from, { email: "gate@pack.test", name: "The Pack" });
+    assert.equal(msg.subject, "Your Pack sign-in code");
+    const code = msg.text.match(/\b(\d{6})\b/)?.[1];
+    assert.match(code || "", /^\d{6}$/, "text body carries the code");
+    assert.equal(env.DB._tables.dev_outbox.length, 0, "real provider must not touch dev outbox");
+    // the code sent through the binding is the live one
+    const ver = await worker.fetch(verifyReq(email, code), env);
+    assert.equal((await ver.json()).needsClaim, true);
+    // health self-identifies
+    const health = await (await worker.fetch(req("/api/health"), env)).json();
+    assert.equal(health.auth.email, "cloudflare (send_email binding)");
+  } finally {
+    sv.restore();
+  }
+});
+
+test("cloudflare provider fail-closed: binding missing or send error → 503 (no silent code loss)", async () => {
+  const sv = stubSiteverify();
+  try {
+    // binding absent, no fallback armed
+    let env = makeEnv(CF_BASE);
+    let res = await worker.fetch(startReq("nofall@example.net"), env);
+    assert.equal(res.status, 503);
+    assert.equal((await res.json()).error.code, "auth_unconfigured");
+    // binding present but domain unverified, no fallback armed
+    env = makeEnv({ ...CF_BASE, EMAIL: fakeEmailBinding("unverified") });
+    res = await worker.fetch(startReq("unver@example.net"), env);
+    assert.equal(res.status, 503);
+    assert.equal((await res.json()).error.code, "email_send_failed");
+    assert.equal(env.DB._tables.dev_outbox.length, 0);
+  } finally {
+    sv.restore();
+  }
+});
+
+test("cloudflare provider + EMAIL_STUB_FALLBACK=1 (preview): binding-absent AND send-error both drop into dev outbox, loudly", async () => {
+  const sv = stubSiteverify();
+  try {
+    // binding absent → config-level fallback
+    let env = makeEnv({ ...CF_BASE, EMAIL_STUB_FALLBACK: "1" });
+    let res = await worker.fetch(startReq("fb1@example.net"), env);
+    assert.equal(res.status, 200);
+    assert.match(lastCodeFor(env, "fb1@example.net") || "", /^\d{6}$/);
+    let health = await (await worker.fetch(req("/api/health"), env)).json();
+    assert.match(health.auth.email, /stub fallback/);
+    // binding present, domain unverified → runtime fallback; code still verifies
+    const EMAILB = fakeEmailBinding("unverified");
+    env = makeEnv({ ...CF_BASE, EMAIL: EMAILB, EMAIL_STUB_FALLBACK: "1" });
+    res = await worker.fetch(startReq("fb2@example.net"), env);
+    assert.equal(res.status, 200);
+    assert.equal(EMAILB.sent.length, 1, "real send attempted first");
+    const code = lastCodeFor(env, "fb2@example.net");
+    assert.match(code || "", /^\d{6}$/);
+    assert.equal((await worker.fetch(verifyReq("fb2@example.net", code), env)).status, 200);
+    health = await (await worker.fetch(req("/api/health"), env)).json();
+    assert.match(health.auth.email, /stub-fallback ARMED/);
+  } finally {
+    sv.restore();
+  }
+});
+
+test("DEV MAIL banner mirrors the sender truth (shown for stub-ish, absent for real binding)", async () => {
+  // stub-ish (fallback armed, binding absent) → banner
+  let env = makeEnv({ ...CF_BASE, EMAIL_STUB_FALLBACK: "1" });
+  let html = await (await worker.fetch(req("/", { headers: { "cf-connecting-ip": nextIp() } }), env)).text();
+  assert.match(html, /DEV MAIL MODE/);
+  // healthy real binding, no fallback → no banner
+  env = makeEnv({ ...CF_BASE, EMAIL: fakeEmailBinding("ok") });
+  html = await (await worker.fetch(req("/", { headers: { "cf-connecting-ip": nextIp() } }), env)).text();
+  assert.doesNotMatch(html, /DEV MAIL MODE/);
+});
+
 test("no account-existence oracle: start responds identically for bound and unknown emails", async () => {
   const sv = stubSiteverify();
   try {
