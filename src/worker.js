@@ -4,6 +4,7 @@ import { accessGateApplies, accessGateOk, authMode, resolveIdentity, resolveOrRe
 import { getDenBySlug } from "./db.js";
 import { DenRoom } from "./den-room.js";
 import { VoiceDen } from "./voice/voice-den.js";
+import { castForDen } from "./voice/config.js";
 import { denPage, homePage, notFoundPage, payCheckoutPage, payPage, payThanksPage, sanitizeFromPath } from "./pages.js";
 import { allScaleConfigured, handleAllScaleWebhook } from "./payments.js";
 import { CREDIT_SKUS } from "./credits.js";
@@ -232,7 +233,14 @@ export default {
         const den = await getDenBySlug(env.DB, denMatch[1]);
         if (!den) return withSecurityHeaders(html(notFoundPage(), 404), env);
         const { identity, setCookie } = await resolveOrRecoverIdentity(request, env);
-        return withSecurityHeaders(html(denPage(den, identity?.user || null), 200, setCookie), env);
+        // Cast dens (multi-AI voice, e.g. fireside-voices) render honest
+        // resident-voice copy: the page must talk about ITS wolves, not the
+        // generic Den Keeper (overnight-qa 2026-07-24).
+        const cast = castForDen(den.slug, env);
+        return withSecurityHeaders(
+          html(denPage(den, identity?.user || null, { castNames: cast ? cast.map((c) => c.name) : null }), 200, setCookie),
+          env,
+        );
       }
 
       return withSecurityHeaders(html(notFoundPage(), 404), env);

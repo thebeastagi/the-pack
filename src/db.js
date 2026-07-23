@@ -38,6 +38,8 @@ export const SQL = {
 
   insertMessage:
     "INSERT INTO messages (id, den_id, user_id, body, created_at) VALUES (?, ?, ?, ?, ?)",
+  lastMessageTimes:
+    "SELECT den_id, MAX(created_at) AS last FROM messages GROUP BY den_id",
   recentMessages:
     "SELECT m.id, m.body, m.created_at, u.handle, u.display_name, u.kind FROM messages m JOIN users u ON u.id = m.user_id WHERE m.den_id = ? ORDER BY m.created_at DESC LIMIT ?",
 
@@ -288,6 +290,16 @@ export async function createMessage(db, { denId, userId, body }) {
     .bind(msg.id, msg.den_id, msg.user_id, msg.body, msg.created_at)
     .run();
   return msg;
+}
+
+// Honest recency for den cards: real MAX(created_at) per den, one query for
+// the whole list (overnight-qa 2026-07-24, UX self-audit K4 — soften
+// present=0 with TRUE "last flame" timestamps, never fake presence).
+export async function getLastMessageTimes(db) {
+  const res = await db.prepare(SQL.lastMessageTimes).all();
+  const map = {};
+  for (const r of res.results || []) map[r.den_id] = r.last;
+  return map;
 }
 
 export async function getRecentMessages(db, denId, limit = 50) {

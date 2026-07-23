@@ -413,11 +413,21 @@ export async function handleApi(request, env, url, ctx = null) {
 
   // ── dens ────────────────────────────────────────────────────────────────
   if (path === "/api/dens" && method === "GET") {
-    const dens = await db.listDens(env.DB);
+    // Internal load-test dens (slug prefix "load-") never reach the public
+    // roster — they read as fake organic activity, which breaks the "what
+    // you see is real" promise (UX self-audit 2026-07-23, finding K1).
+    // Direct URLs still work; only the public listing hides them.
+    const dens = (await db.listDens(env.DB)).filter((d) => !d.slug.startsWith("load-"));
+    const lastTimes = await db.getLastMessageTimes(env.DB);
     const out = await Promise.all(
       dens.map(async (d) => {
         const [presence, members] = await Promise.all([livePresence(env, d), db.getMemberCount(env.DB, d.id)]);
-        return db.publicDen(d, { present: presence.present, members });
+        return db.publicDen(d, {
+          present: presence.present,
+          members,
+          // honest recency: real last-message time or null — never invented
+          lastActivity: lastTimes[d.id] || null,
+        });
       }),
     );
     return json({ ok: true, dens: out });

@@ -20,7 +20,7 @@ routes = [
 ]
 
 [vars]
-PACK_VERSION = "0.10.1-preview-voice-den"  # multi-AI voice casts: fireside-voices Ash+Birch (2026-07-23)
+PACK_VERSION = "0.10.2-preview-overnight-qa"  # overnight QA round 1: UX fixes on voice-den+release-0.10 (2026-07-24)
 # ── native auth (M1, PREVIEW-ONLY posture) ─────────────────────────────────
 # AUTH_MODE: "access" (default when absent — prod behavior) | "native".
 # Preview runs native; the Access edge app on pack-preview stays UP, so the
@@ -121,3 +121,12 @@ database_name = "beast-pack-preview-db"
 database_id = "595e655f-e1a8-494b-bf39-96267c8d61d1"
 migrations_dir = "migrations"
 
+
+# Den artwork + /imagine media. Preview READS the same R2 bucket as prod so
+# den art renders (prod parity for morning review — the missing binding was
+# why preview dens had no art banner; overnight-qa 2026-07-24). Writes from
+# preview /imagine land under unique uuids in /media/gen/ — no prod object
+# can be overwritten.
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "the-pack-media"

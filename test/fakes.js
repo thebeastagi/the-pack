@@ -161,6 +161,16 @@ export function createFakeD1() {
         t.messages.push({ id: a[0], den_id: a[1], user_id: a[2], body: a[3], created_at: a[4] });
       },
     },
+    [SQL.lastMessageTimes]: {
+      all() {
+        const map = new Map();
+        for (const m of t.messages) {
+          const cur = map.get(m.den_id);
+          if (!cur || m.created_at > cur) map.set(m.den_id, m.created_at);
+        }
+        return [...map.entries()].map(([den_id, last]) => ({ den_id, last }));
+      },
+    },
     [SQL.recentMessages]: {
       all(a) {
         return t.messages

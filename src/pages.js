@@ -261,6 +261,7 @@ export function homePage(identity, env = {}) {
       ? `<div class="card" id="gate">
        <h2 class="sec" style="margin-top:0">Enter the pack</h2>
        <p style="color:var(--text-muted);font-size:14px;margin-bottom:12px">No passwords. Type your email, we send a one-time code, you're in — new or returning, same door.</p>
+       <p style="color:var(--text-dim);font-size:12px;margin-bottom:12px">Dens are public rooms — anyone can read them (<a href="#dens">peek below first</a>); what you say around a fire is world-readable.</p>
        ${tsTestBanner}${devMailBanner}
        <form id="otp-start" class="grid" style="gap:12px">
          <div><label for="ge">email</label><input id="ge" name="email" type="email" required maxlength="120" placeholder="you@example.com" autocomplete="email"></div>
@@ -334,6 +335,7 @@ if(vf)vf.addEventListener('submit',async(e)=>{e.preventDefault();$('#verify-err'
   <h1>The Pack</h1>
   <p class="lead">Talk with AI agents that <b>remember</b> — by text or live voice, in rooms around a fire (we call them <b>dens</b>), where humans and AI hang out as equals.</p>
   <p class="phase">free to join · no passwords — just your email · text + live voice rooms</p>
+  ${identity ? "" : `<p class="phase" style="margin-top:8px">👀 <a href="#dens">dens are public — peek into a live room before you sign up</a></p>`}
 </section>
 ${gate}${claimBlock}
 <h2 class="sec">Dens — live rooms</h2>
@@ -343,13 +345,23 @@ ${bring}
 <script>
 const $=(s)=>document.querySelector(s);
 async function api(path,opts){const r=await fetch(path,{headers:{'content-type':'application/json'},...opts});const d=await r.json().catch(()=>({}));return{r,d}}
+function ago(iso){ // honest relative time from a REAL timestamp — never invented
+  if(!iso)return null;
+  const t=new Date(/[zZ]|[+-]\\d\\d:?\\d\\d$/.test(iso)?iso:iso.replace(' ','T')+'Z').getTime();
+  const s=(Date.now()-t)/1000;
+  if(!isFinite(s)||s<0)return null;
+  if(s<90)return 'moments ago';if(s<3600)return Math.round(s/60)+'m ago';
+  if(s<86400)return Math.round(s/3600)+'h ago';return Math.round(s/86400)+'d ago';
+}
 function denItem(d){
   const live=d.present>0;
   const brain=d.brainTier==='premium'?' 🧠4.5':d.brainTier==='build'?' 🧠build':'';
   const search=d.searchTools?' 🔎live':'';
+  const last=ago(d.lastActivity);
+  const pc=live?d.present+' present':(last?'last flame '+last:'fire burns low');
   return '<a class="den-item" href="/den/'+encodeURIComponent(d.slug)+'">'+
     '<div><h3></h3><div class="topic"></div></div>'+
-    '<div class="meta"><span class="pres-dot '+(live?'live':'')+'"></span><span class="pc">'+(live?d.present+' present':'fire burns low')+'</span><br>'+
+    '<div class="meta"><span class="pres-dot '+(live?'live':'')+'"></span><span class="pc">'+pc+'</span><br>'+
     '<span class="mc">'+d.members+' member'+(d.members===1?'':'s')+brain+search+'</span></div></a>';
 }
 function renderDens(list){
@@ -367,7 +379,17 @@ if(cf)cf.addEventListener('submit',async(e)=>{e.preventDefault();$('#claim-err')
   const cb={handle:$('#h').value.trim(),displayName:$('#dn').value.trim()};
   if(CT)cb.claimTicket=CT;
   const{r,d}=await api('/api/handles',{method:'POST',body:JSON.stringify(cb)});
-  if(d.ok){location.reload();return}
+  if(d.ok){
+    // Fresh wolves land IN the liveliest den, not on a bare reload — the
+    // peak-motivation instant goes straight to the fire (self-audit K3).
+    try{
+      const{d:dl}=await api('/api/dens');
+      const ds=((dl&&dl.dens)||[]).slice().sort((a,b)=>(b.present-a.present)||
+        (new Date(b.lastActivity||0).getTime()-new Date(a.lastActivity||0).getTime()));
+      if(ds[0]){location.href='/den/'+encodeURIComponent(ds[0].slug);return}
+    }catch{}
+    location.reload();return
+  }
   if(d.error&&d.error.code==='email_bound'){
     const{d:rec}=await api('/api/session/recover',{method:'POST',body:JSON.stringify(CT?{claimTicket:CT}:{})});
     if(rec.ok){location.reload();return}
@@ -401,29 +423,51 @@ if(bf)bf.addEventListener('submit',async(e)=>{e.preventDefault();
   return layout({ title: "Home", body, identity });
 }
 
-export function denPage(den, identity) {
+export function denPage(den, identity, opts = {}) {
   const brainLabel =
     den.brain_tier === "premium" ? "Grok 4.5" : den.brain_tier === "build" ? "Grok Build 0.1" : "Grok 4.20";
+  // Multi-AI voice cast (e.g. fireside-voices: Ash & Birch) — the page talks
+  // about ITS resident wolves, honestly: they are voice residents who wake
+  // when someone joins voice, never faked as "present" sockets.
+  const castNames = Array.isArray(opts.castNames) && opts.castNames.length ? opts.castNames.map(String) : null;
+  const castLabel = castNames ? castNames.join(" & ") : null;
+  const emptyNote = castNames
+    ? `${castLabel} doze by the fire — join voice and they wake`
+    : "the fire burns low — the pack is elsewhere";
+  const voiceCopy = castNames
+    ? `live voice: <b>${castNames.map((n) => escapeHtml(n)).join(" &amp; ")}</b> — the AI wolves of this den — talk by this fire. Join voice: they hear you.`
+    : "live voice: talk out loud with the Den Keeper (our AI host) — and everyone in the room";
+  const residents = castNames
+    ? `<div class="roster on" id="residents">
+  <div class="r-head">🎙 resident AI voices — always of this den, they speak (and hear you) when someone joins voice</div>
+  <div class="chips">${castNames
+    .map(
+      (n) =>
+        `<span class="chip"><span class="h">${escapeHtml(n)}</span><span class="kind-badge">✦ AI voice</span></span>`,
+    )
+    .join("")}</div>
+</div>`
+    : "";
   const body = `
 <p style="margin-top:24px"><a href="/">← all dens</a></p>
 ${den.art_url ? `<div class="den-art"><img src="${escapeHtml(den.art_url)}" alt="Den artwork — ${escapeHtml(den.name)}" loading="lazy"><div class="den-art-fade"></div></div>` : ""}
 <h1 style="font:700 39px/46px var(--font-d);margin-top:8px">${escapeHtml(den.name)}</h1>
 <p style="color:var(--text-muted);margin-top:4px">${escapeHtml(den.topic || "")}</p>
-<p style="color:var(--text-dim);font:500 11px/16px var(--font-m);margin-top:2px">🧠 ${brainLabel} · ${den.search_tools === 0 ? "live search off" : "🔎 live web + X search (capped)"} · type <b>/imagine &lt;idea&gt;</b> to paint into the den</p>
+<p style="color:var(--text-dim);font:500 11px/16px var(--font-m);margin-top:2px">🧠 ${brainLabel} · ${den.search_tools === 0 ? "live search off" : "🔎 live web + X search (capped)"} · type <b>/imagine &lt;idea&gt;</b> to paint into the den · public room — anyone can read it</p>
 
 <div class="den-stage empty" id="stage">
   <div class="fire" id="fire"></div>
-  <div class="empty-note" id="stage-note">the fire burns low — the pack is elsewhere</div>
+  <div class="empty-note" id="stage-note">${escapeHtml(emptyNote)}</div>
 </div>
 
 <div class="roster" id="roster">
   <div class="r-head" id="r-head"></div>
   <div class="chips" id="r-chips"></div>
 </div>
-
+${residents}
 <div class="voice-bar" id="voice-bar">
   <span class="mic-dot" id="mic-dot"></span>
-  <span class="vstatus" id="vstatus">live voice: talk out loud with the Den Keeper (our AI host) — and everyone in the room</span>
+  <span class="vstatus" id="vstatus">${voiceCopy}</span>
   ${identity ? '<button class="btn ghost" id="voice-btn" type="button">🎙 Join voice</button>' : '<span class="vstatus">pick a username to join the voice room</span>'}
   <span class="cost" id="vcost"></span>
 </div>
@@ -450,6 +494,9 @@ ${den.art_url ? `<div class="den-art"><img src="${escapeHtml(den.art_url)}" alt=
 </div>
 <script>
 const SLUG=${JSON.stringify(den.slug)};
+const AUTHED=${identity ? "true" : "false"};
+const CAST=${JSON.stringify(castNames || [])};
+const EMPTY_NOTE=${JSON.stringify(emptyNote)};
 // ── deterministic wolf avatars (star-wolf = AI · human-wolf = human) ──
 // serialized from src/avatar.js — same functions the worker uses server-side
 const THEME='general';
@@ -489,7 +536,7 @@ function renderStage(roster){
   stage.querySelectorAll('.seat').forEach(n=>n.remove());
   const live=roster&&roster.length>0;
   stage.classList.toggle('empty',!live);
-  note.textContent=live?'around the fire right now':'the fire burns low — the pack is elsewhere';
+  note.textContent=live?'around the fire right now':EMPTY_NOTE;
   if(!live)return;
   const W=stage.clientWidth,cx=W/2,cy=stage.clientHeight/2-10;
   const R=Math.max(60,Math.min(110,W/2-44)); // seats always inside the stage
@@ -524,9 +571,15 @@ function setStatus(present){status.innerHTML='';const s=document.createElement('
   s.textContent='● '+present+' present';status.appendChild(s);status.appendChild(document.createTextNode('  ·  live presence, honest state'))}
 window.addEventListener('resize',()=>renderStage(roster));
 let roster=[],ws=null;
+const SEEN=new Set(); // guest-mode dedupe: message ids already rendered
 async function init(){
   const hr=await fetch('/api/dens/'+encodeURIComponent(SLUG)+'/messages').then(r=>r.json()).catch(()=>null);
-  if(hr&&hr.ok)hr.messages.forEach(addMsg);
+  if(hr&&hr.ok){
+    hr.messages.forEach(m=>{if(m.id)SEEN.add(m.id);addMsg(m)});
+    if(!hr.messages.length)sysNote(CAST.length
+      ?('no words at this fire yet — say the first, or 🎙 join voice to wake '+CAST.join(' & '))
+      :'no words at this fire yet — say the first');
+  }
   const form=$('#composer');
   let imagining=false;
   form.addEventListener('submit',async(e)=>{e.preventDefault();const inp=$('#msg');const v=inp.value.trim();
@@ -545,7 +598,25 @@ async function init(){
       return;
     }
     if(ws&&ws.readyState===1){ws.send(JSON.stringify({type:'chat',body:v}));inp.value=''}});
-  connect();
+  // Guests (no session) get an honest read-only live view: the WS would only
+  // 401-loop ("reconnecting…" forever — the pre-QA bug), so poll the public
+  // messages + presence APIs instead and say exactly what this mode is.
+  if(AUTHED)connect();else guestWatch();
+}
+function guestWatch(){
+  status.innerHTML='';const s=document.createElement('span');s.className='live';
+  s.textContent='👀 watching as a guest';status.appendChild(s);
+  status.appendChild(document.createTextNode(' · live view, updates every few seconds — claim a username on the home page to speak'));
+  async function tick(){
+    try{
+      const[hr,pr]=await Promise.all([
+        fetch('/api/dens/'+encodeURIComponent(SLUG)+'/messages').then(r=>r.json()),
+        fetch('/api/dens/'+encodeURIComponent(SLUG)+'/presence').then(r=>r.json())]);
+      if(hr&&hr.ok)hr.messages.forEach(m=>{if(m.id&&!SEEN.has(m.id)){SEEN.add(m.id);addMsg(m)}});
+      if(pr&&pr.ok){roster=pr.roster||[];renderStage(roster);renderRoster(roster)}
+    }catch{}
+  }
+  tick();setInterval(tick,8000);
 }
 function connect(){
   ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/api/dens/'+encodeURIComponent(SLUG)+'/ws');
@@ -844,6 +915,7 @@ export function payCheckoutPage(identity, pack, from = null) {
   <button class="btn fire big" id="co-go">Continue to secure checkout — $${pack.usd}.00</button>
   <div class="error" id="co-err" style="text-align:center;margin-top:10px"></div>
   <p class="co-note">Buying as <b>@${escapeHtml(identity.handle)}</b> · nothing is charged until you pay on the next page · the checkout link expires after ~1 hour</p>
+  <p class="co-note" style="margin-top:6px">prepaid credits: non-refundable · no cash-out · 18+ · <a href="/pay">full terms &amp; burn rates</a></p>
   <a class="co-cancel" href="/pay${from ? `?from=${encodeURIComponent(from)}` : ""}">← changed my mind</a>
 </div>
 <div class="co-overlay" id="co-overlay"><div class="box">
