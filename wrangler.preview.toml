@@ -20,7 +20,7 @@ routes = [
 ]
 
 [vars]
-PACK_VERSION = "0.9.1-preview-cf-email"  # M1+ (2026-07-23): native OTP auth + Cloudflare Email Service sender
+PACK_VERSION = "0.9.2-preview-cf-email"  # M1+ (2026-07-23): native OTP auth + Cloudflare Email Service sender
 # ── native auth (M1, PREVIEW-ONLY posture) ─────────────────────────────────
 # AUTH_MODE: "access" (default when absent — prod behavior) | "native".
 # Preview runs native; the Access edge app on pack-preview stays UP, so the
