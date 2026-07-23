@@ -20,7 +20,7 @@ routes = [
 ]
 
 [vars]
-PACK_VERSION = "0.10.0-preview-merged"  # merged payment-ux + avatars onto native-auth base (2026-07-23)
+PACK_VERSION = "0.10.1-preview-voice-den"  # multi-AI voice casts: fireside-voices Ash+Birch (2026-07-23)
 # ── native auth (M1, PREVIEW-ONLY posture) ─────────────────────────────────
 # AUTH_MODE: "access" (default when absent — prod behavior) | "native".
 # Preview runs native; the Access edge app on pack-preview stays UP, so the
@@ -63,7 +63,7 @@ PACK_SEARCH_DEN_CAP = "40"            # tool calls / den / UTC day (~$0.20)
 PACK_SEARCH_GLOBAL_CAP = "600"        # tool calls / UTC day across all dens (~$3.00)
 PACK_IMAGE_DEN_CAP = "15"             # images / den / UTC day (~$0.03)
 PACK_IMAGE_GLOBAL_CAP = "300"         # images / UTC day across all dens (~$0.60)
-PACK_BRAIN_DAILY_USD_CAP = "0"     # hard ceiling across ALL brain spend / UTC day (incl. voice estimate)
+PACK_BRAIN_DAILY_USD_CAP = "2"     # hard daily ceiling incl. voice estimate — preview raised 0→2 for voice-den E2E + Robin ear-check (voice preflight fail-closes at 0)
 # v0.6.0 (2026-07-21, wave 2) — Collections RAG (per-den xAI knowledge bases)
 # + Voice Agent API tools in voice sessions. Same fail-closed caps pattern.
 PACK_RAG_DEFAULT = "0"                # "0" = global kill switch for den knowledge bases
@@ -72,7 +72,7 @@ PACK_RAG_GLOBAL_CAP = "200"           # file_search calls / UTC day across all d
 PACK_DEN_DOCS_CAP = "20"              # max docs per den knowledge base (≤20KB text each)
 PACK_VOICE_TOOLS = "0"                # "0" = no tools key on voice sessions at all
 PACK_VOICE_SEARCH_DEFAULT = "1"       # "0" = no web/X tools in voice (den file_search unaffected)
-PACK_VOICE_DEN_MIN_CAP = "10"         # voice minutes / den / UTC day (global day cap stays 30)
+PACK_VOICE_DEN_MIN_CAP = "30"         # voice LEG-minutes / den / UTC day (2-leg cast den = 15 wall-min ≈ $1.50/day; global day cap stays 30 leg-min)
 # v0.7.0 (2026-07-21, phase-1 monetisation) — den-fire credits. The PACK_*
 # caps above (search/image/RAG counts + daily USD) are HARD infrastructure
 # ceilings (absolute for everyone, paying or not). The PACK_FREE_* vars below
