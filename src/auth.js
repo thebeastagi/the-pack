@@ -2,10 +2,61 @@
 // login (Robin's CF-dashboard work) can replace handle-claim later without
 // touching call sites.
 import * as db from "./db.js";
-import { parseCookies, randomToken, safeEqualHex, sha256Hex } from "./util.js";
+import { EMAIL_RE, parseCookies, randomToken, safeEqualHex, sha256Hex } from "./util.js";
 
 export const SESSION_COOKIE = "pack_session";
 const SESSION_TTL_MS = 30 * 24 * 3600 * 1000;
+
+// ── login recovery (0009, 2026-07-23) ─────────────────────────────────────
+// The CF Access edge OTP-verifies an email on every visit and sets
+// cf-access-authenticated-user-email on protected routes (never spoofable
+// from the open internet: workers_dev=false, the custom domain is the only
+// door, and the Access edge strips/overwrites the header). That verified
+// email IS the recovery credential — no passwords, no new infrastructure.
+//
+// Legacy accounts (created before this ship) hold self-asserted emails; they
+// are promoted to verified on first successful recovery. The grandfather
+// cutoff prevents a post-ship claimer from typing someone else's address and
+// turning it into hijack bait: typed (unverified) emails created AFTER the
+// cutoff are never recovery targets.
+const LEGACY_EMAIL_CUTOFF = "2026-07-23T00:00:00.000Z";
+
+/** Verified email from the Access edge, lowercased — or null. */
+export function accessEmail(request) {
+  const raw = (request.headers.get("cf-access-authenticated-user-email") || "").trim().toLowerCase();
+  if (!raw || raw.length > 120 || !EMAIL_RE.test(raw)) return null;
+  return raw;
+}
+
+/** email → its ONE bound account (verified first, then legacy promote). Null if none. */
+export async function recoverUserByEmail(env, email) {
+  const bound = await db.getUserByVerifiedEmail(env.DB, email);
+  if (bound) return bound;
+  const legacy = await db.getLegacyUserByEmail(env.DB, email, LEGACY_EMAIL_CUTOFF);
+  if (legacy) {
+    await db.bindVerifiedEmail(env.DB, legacy.id, email);
+    legacy.email = email;
+    legacy.email_verified_at = new Date().toISOString();
+    return legacy;
+  }
+  return null;
+}
+
+// Silent session resume for page GETs: no cookie session, but the Access
+// edge says who this email is and that email is bound to an account — sign
+// them straight back in (returning user opens the site ⇒ lands as @handle,
+// zero clicks). Returns { identity, setCookie|null }.
+export async function resolveOrRecoverIdentity(request, env) {
+  const identity = await resolveIdentity(request, env);
+  if (identity) return { identity, setCookie: null };
+  const email = accessEmail(request);
+  if (!email) return { identity: null, setCookie: null };
+  const user = await recoverUserByEmail(env, email);
+  if (!user) return { identity: null, setCookie: null };
+  const { token, expiresAt } = await issueSession(env, user.id, request.headers.get("user-agent") || "");
+  await db.touchUser(env.DB, user.id);
+  return { identity: { user, via: "recovered" }, setCookie: sessionCookieHeader(token, expiresAt) };
+}
 
 export async function issueSession(env, userId, userAgent = "") {
   const token = randomToken(32);

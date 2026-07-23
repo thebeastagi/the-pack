@@ -1,3 +1,5 @@
+# PREVIEW-ONLY config (login-recovery branch) — isolated worker + OWN D1.
+# NO spend secrets are ever set on this worker; payments stay 'unconfigured'.
 # The Pack — worker: beast-pack
 # Social platform of dens where humans and AI agents coexist. Zero runtime deps.
 # Secrets (never committed — `wrangler secret put` only):
@@ -7,23 +9,23 @@
 #   ALLSCALE_API_KEY   — AllScale store API key (credit checkout signing)
 #   ALLSCALE_API_SECRET— AllScale store API secret (HMAC sign + webhook verify)
 
-name = "beast-pack"
+name = "beast-pack-preview"
 main = "src/worker.js"
 compatibility_date = "2026-07-21"
 workers_dev = false   # the only door is pack.thebeastagi.com behind CF Access (public launch: any-email OTP)
 preview_urls = false
 
 routes = [
-  { pattern = "pack.thebeastagi.com", custom_domain = true },
+  { pattern = "pack-preview.thebeastagi.com", custom_domain = true },
 ]
 
 [vars]
-PACK_VERSION = "0.8.0"           # 0.8.0 (2026-07-23): login recovery — email-to-username permanent binding (migration 0009)
+PACK_VERSION = "0.8.0-preview"           # 0.8.0 (2026-07-23): login recovery — email-to-username permanent binding (migration 0009)
 # Access gate stays ON post-launch (2026-07-21 public flip): the main app policy
 # is now "everyone" — any email via one-time code. Verified email = signup + abuse
 # guard. Full lift (no gate at all) = "0" + redeploy + remove/disable the main app.
 PRIVATE_BETA = "1"
-HOSTNAME = "pack.thebeastagi.com"
+HOSTNAME = "pack-preview.thebeastagi.com"
 REALTIME_SFU_APP_ID = "d781a853273752ae764ef806fbb4ee2c"  # fleet raw-SFU app (non-secret id)
 XAI_MODEL = "grok-voice-think-fast-1.0"
 XAI_CHAT_MODEL = "grok-4.20-0309-non-reasoning"   # Grok brain seam (agent citizens); key = XAI_API_KEY secret
@@ -32,19 +34,19 @@ XAI_CHAT_MODEL = "grok-4.20-0309-non-reasoning"   # Grok brain seam (agent citiz
 XAI_PREMIUM_MODEL = "grok-4.5"        # premium den brain tier ($2/$6 per Mtok)
 XAI_BUILD_MODEL = "grok-build-0.1"    # coding-den brain tier ($1/$2 per Mtok)
 XAI_IMAGE_MODEL = "grok-imagine-image"  # /imagine (~$0.002/img at 1k)
-PACK_SEARCH_DEFAULT = "1"             # "0" = global kill switch for live-search tools
+PACK_SEARCH_DEFAULT = "0"             # "0" = global kill switch for live-search tools
 PACK_SEARCH_DEN_CAP = "40"            # tool calls / den / UTC day (~$0.20)
 PACK_SEARCH_GLOBAL_CAP = "600"        # tool calls / UTC day across all dens (~$3.00)
 PACK_IMAGE_DEN_CAP = "15"             # images / den / UTC day (~$0.03)
 PACK_IMAGE_GLOBAL_CAP = "300"         # images / UTC day across all dens (~$0.60)
-PACK_BRAIN_DAILY_USD_CAP = "5.00"     # hard ceiling across ALL brain spend / UTC day (incl. voice estimate)
+PACK_BRAIN_DAILY_USD_CAP = "0"     # hard ceiling across ALL brain spend / UTC day (incl. voice estimate)
 # v0.6.0 (2026-07-21, wave 2) — Collections RAG (per-den xAI knowledge bases)
 # + Voice Agent API tools in voice sessions. Same fail-closed caps pattern.
-PACK_RAG_DEFAULT = "1"                # "0" = global kill switch for den knowledge bases
+PACK_RAG_DEFAULT = "0"                # "0" = global kill switch for den knowledge bases
 PACK_RAG_DEN_CAP = "30"               # file_search calls / den / UTC day (~$0.08)
 PACK_RAG_GLOBAL_CAP = "200"           # file_search calls / UTC day across all dens (~$0.50)
 PACK_DEN_DOCS_CAP = "20"              # max docs per den knowledge base (≤20KB text each)
-PACK_VOICE_TOOLS = "1"                # "0" = no tools key on voice sessions at all
+PACK_VOICE_TOOLS = "0"                # "0" = no tools key on voice sessions at all
 PACK_VOICE_SEARCH_DEFAULT = "1"       # "0" = no web/X tools in voice (den file_search unaffected)
 PACK_VOICE_DEN_MIN_CAP = "10"         # voice minutes / den / UTC day (global day cap stays 30)
 # v0.7.0 (2026-07-21, phase-1 monetisation) — den-fire credits. The PACK_*
@@ -55,7 +57,7 @@ PACK_VOICE_DEN_MIN_CAP = "10"         # voice minutes / den / UTC day (global da
 PRICE_MULTIPLIER = "2.0"              # credit burn = ceil(real_ticks × this × 100 / 1e10), floored per surface
 PACK_FREE_SEARCH_DEN_CAP = "20"       # free live-search replies / den / UTC day (was 40)
 PACK_FREE_IMAGE_DEN_CAP = "3"         # free /imagine paintings / den / UTC day (was 15)
-PACK_FREE_DAILY_USD_CAP = "2.00"      # global free-spend fuse / UTC day (was $5 — now the hard ceiling above)
+PACK_FREE_DAILY_USD_CAP = "0"      # global free-spend fuse / UTC day (was $5 — now the hard ceiling above)
 ALLSCALE_BASE_URL = "https://openapi.allscale.io"  # AllScale OpenAPI (key/secret stay secrets)
 # Phase 2.7 — Agentverse Memory + provenance + hosted agents (non-secret config;
 # AM_API_KEY + PACK_SIGNING_KEY_JWK stay `wrangler secret put` only).
@@ -85,10 +87,7 @@ new_sqlite_classes = ["VoiceDen"]
 
 [[d1_databases]]
 binding = "DB"
-database_name = "beast-pack-db"
-database_id = "1ae5a0ac-2129-4df3-98bf-e13bf9b106ab"
+database_name = "beast-pack-preview-db"
+database_id = "595e655f-e1a8-494b-bf39-96267c8d61d1"
 migrations_dir = "migrations"
 
-[[r2_buckets]]
-binding = "MEDIA"
-bucket_name = "the-pack-media"

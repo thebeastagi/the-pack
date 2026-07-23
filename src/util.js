@@ -37,6 +37,7 @@ export function escapeHtml(value) {
 
 export const HANDLE_RE = /^[a-z0-9][a-z0-9_-]{1,23}$/;
 export const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
+export const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 export const RESERVED_SLUGS = new Set(["api", "den", "dens", "admin", "health", "ws", "assets", "www"]);
 
 export function isHandle(v) {

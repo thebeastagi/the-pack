@@ -17,11 +17,38 @@ export function createFakeD1() {
         if (t.users.some((u) => u.handle.toLowerCase() === a[1].toLowerCase())) {
           throw new Error("UNIQUE constraint failed: users.handle");
         }
-        t.users.push({ id: a[0], handle: a[1], display_name: a[2], email: a[3], kind: a[4], created_at: a[5], last_seen_at: null });
+        // 0009 partial unique index: one VERIFIED email per account.
+        if (a[4] && a[3] && t.users.some((u) => u.email_verified_at && u.email && u.email.toLowerCase() === a[3].toLowerCase())) {
+          throw new Error("UNIQUE constraint failed: idx_users_verified_email");
+        }
+        t.users.push({ id: a[0], handle: a[1], display_name: a[2], email: a[3], email_verified_at: a[4], kind: a[5], created_at: a[6], last_seen_at: null });
       },
     },
     [SQL.userByHandle]: { first: (a) => clone(t.users.find((u) => u.handle.toLowerCase() === a[0].toLowerCase())) },
     [SQL.userById]: { first: (a) => clone(t.users.find((u) => u.id === a[0])) },
+    [SQL.userByVerifiedEmail]: {
+      first: (a) => clone(t.users.find((u) => u.email && u.email.toLowerCase() === a[0].toLowerCase() && u.email_verified_at)),
+    },
+    [SQL.legacyUserByEmail]: {
+      first: (a) =>
+        clone(
+          t.users
+            .filter((u) => u.email && u.email.toLowerCase() === a[0].toLowerCase() && !u.email_verified_at && u.kind === "human" && u.created_at < a[1])
+            .sort((x, y) => (x.created_at < y.created_at ? -1 : 1))[0],
+        ),
+    },
+    [SQL.bindVerifiedEmail]: {
+      run(a) {
+        const u = t.users.find((x) => x.id === a[2]);
+        if (u) {
+          if (t.users.some((o) => o.id !== u.id && o.email_verified_at && o.email && o.email.toLowerCase() === a[0].toLowerCase())) {
+            throw new Error("UNIQUE constraint failed: idx_users_verified_email");
+          }
+          u.email = a[0];
+          u.email_verified_at = a[1];
+        }
+      },
+    },
     [SQL.touchUser]: {
       run(a) {
         const u = t.users.find((x) => x.id === a[1]);

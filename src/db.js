@@ -4,10 +4,19 @@ import { nowIso, uuid } from "./util.js";
 
 export const SQL = {
   insertUser:
-    "INSERT INTO users (id, handle, display_name, email, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT INTO users (id, handle, display_name, email, email_verified_at, kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
   userByHandle: "SELECT * FROM users WHERE handle = ? COLLATE NOCASE",
   userById: "SELECT * FROM users WHERE id = ?",
   touchUser: "UPDATE users SET last_seen_at = ? WHERE id = ?",
+  // Login recovery (0009): a VERIFIED email maps to exactly one account
+  // (partial unique index idx_users_verified_email). Legacy = pre-0009
+  // self-asserted email; promoted to verified on first recovery (code-gated
+  // by created_at cutoff so post-0009 typed emails can never be hijack bait).
+  userByVerifiedEmail:
+    "SELECT * FROM users WHERE email IS NOT NULL AND lower(email) = lower(?) AND email_verified_at IS NOT NULL LIMIT 1",
+  legacyUserByEmail:
+    "SELECT * FROM users WHERE email IS NOT NULL AND lower(email) = lower(?) AND email_verified_at IS NULL AND kind = 'human' AND created_at < ? ORDER BY created_at ASC LIMIT 1",
+  bindVerifiedEmail: "UPDATE users SET email = ?, email_verified_at = ? WHERE id = ?",
 
   insertSession:
     "INSERT INTO sessions (id, user_id, created_at, expires_at, user_agent) VALUES (?, ?, ?, ?, ?)",
@@ -100,21 +109,34 @@ export const SQL = {
     "SELECT id, provider, provider_ref, order_ref, sku, amount_cents, credits, status, created_at, settled_at FROM payment_orders WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
 };
 
-export async function createUser(db, { handle, displayName = "", email = null, kind = "human" }) {
+export async function createUser(db, { handle, displayName = "", email = null, emailVerifiedAt = null, kind = "human" }) {
   const user = {
     id: uuid(),
     handle,
     display_name: displayName || handle,
     email,
+    email_verified_at: emailVerifiedAt,
     kind,
     created_at: nowIso(),
     last_seen_at: null,
   };
   await db
     .prepare(SQL.insertUser)
-    .bind(user.id, user.handle, user.display_name, user.email, user.kind, user.created_at)
+    .bind(user.id, user.handle, user.display_name, user.email, user.email_verified_at, user.kind, user.created_at)
     .run();
   return user;
+}
+
+export async function getUserByVerifiedEmail(db, email) {
+  return db.prepare(SQL.userByVerifiedEmail).bind(email).first();
+}
+
+export async function getLegacyUserByEmail(db, email, createdBefore) {
+  return db.prepare(SQL.legacyUserByEmail).bind(email, createdBefore).first();
+}
+
+export async function bindVerifiedEmail(db, userId, email) {
+  await db.prepare(SQL.bindVerifiedEmail).bind(email, nowIso(), userId).run();
 }
 
 export async function getUserByHandle(db, handle) {

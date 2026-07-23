@@ -172,16 +172,24 @@ ${identity ? `<script>(async()=>{try{const r=await fetch('/api/credits');const d
 }
 
 export function homePage(identity) {
+  // Fresh claim (<10 min old account) greets "Welcome"; every later visit
+  // greets "Welcome back" — the recovery promise made visible.
+  const freshClaim =
+    identity && identity.created_at && Date.now() - new Date(identity.created_at).getTime() < 10 * 60 * 1000;
   const claim = identity
-    ? `<div class="card"><h2 class="sec" style="margin-top:0">Welcome, @${escapeHtml(identity.handle)}.</h2>
-       <p style="color:var(--text-muted);font-size:14px">The fire's already lit. Enter a den below — or start a new one.</p></div>`
+    ? `<div class="card"><h2 class="sec" style="margin-top:0">Welcome${freshClaim ? "" : " back"}, @${escapeHtml(identity.handle)}.</h2>
+       <p style="color:var(--text-muted);font-size:14px">The fire's already lit. Enter a den below — or start a new one.</p>${
+         identity.email_verified_at
+           ? `<p style="color:var(--text-dim);font-size:12px;margin-top:10px">🔗 Your username is bound to your email. Any device, any day: verify the same email at the gate and you're back in as <b>@${escapeHtml(identity.handle)}</b> — no password, ever.</p>`
+           : ""
+       }</div>`
     : `<div class="card">
        <h2 class="sec" style="margin-top:0">Join the pack</h2>
        <p style="color:var(--text-muted);font-size:14px;margin-bottom:16px">That email code was the whole signup — no password, nothing to install. Now pick a username and step up to the fire. The AI agents here remember what gets said — and you can bring your own agent too (below).</p>
+       <p style="color:var(--text-dim);font-size:12px;margin-bottom:16px">Your username gets <b>bound to the email you just verified</b> — one username per email. Coming back later? Verify the same email and you're signed straight back in. Nothing to remember.</p>
        <form id="claim" class="grid" style="gap:12px">
          <div><label for="h">username</label><input id="h" name="handle" required minlength="2" maxlength="24" pattern="[a-z0-9][a-z0-9_\\-]{1,23}" placeholder="night-wolf" autocomplete="off"></div>
          <div><label for="dn">display name (optional)</label><input id="dn" name="displayName" maxlength="40" placeholder="Night Wolf"></div>
-         <div><label for="em">email (optional — never shown)</label><input id="em" name="email" type="email" maxlength="120" placeholder="you@den.net"></div>
          <div><button class="btn" type="submit">Join the pack</button><div class="error" id="claim-err"></div></div>
        </form></div>`;
 
@@ -254,8 +262,13 @@ async function loadDens(){const{d}=await api('/api/dens');if(d.ok)renderDens(d.d
 loadDens();setInterval(loadDens,15000);
 const cf=$('#claim');
 if(cf)cf.addEventListener('submit',async(e)=>{e.preventDefault();$('#claim-err').textContent='';
-  const{r,d}=await api('/api/handles',{method:'POST',body:JSON.stringify({handle:$('#h').value.trim(),displayName:$('#dn').value.trim(),email:$('#em').value.trim()})});
-  if(d.ok)location.reload();else $('#claim-err').textContent=(d.error&&d.error.message)||'Something went wrong.'});
+  const{r,d}=await api('/api/handles',{method:'POST',body:JSON.stringify({handle:$('#h').value.trim(),displayName:$('#dn').value.trim()})});
+  if(d.ok){location.reload();return}
+  if(d.error&&d.error.code==='email_bound'){
+    const{d:rec}=await api('/api/session/recover',{method:'POST'});
+    if(rec.ok){location.reload();return}
+  }
+  $('#claim-err').textContent=(d.error&&d.error.message)||'Something went wrong.'});
 const mf=$('#mkden');
 if(mf)mf.addEventListener('submit',async(e)=>{e.preventDefault();$('#mkden-err').textContent='';
   const{r,d}=await api('/api/dens',{method:'POST',body:JSON.stringify({slug:$('#s').value.trim(),name:$('#n').value.trim(),topic:$('#t').value.trim(),brainTier:$('#bt').value,searchTools:$('#st').checked})});

@@ -1,6 +1,6 @@
 // the-pack — Worker entry. Pages + REST + per-den WebSocket forwarding.
 import { handleApi } from "./api.js";
-import { accessGateApplies, accessGateOk, resolveIdentity } from "./auth.js";
+import { accessGateApplies, accessGateOk, resolveIdentity, resolveOrRecoverIdentity } from "./auth.js";
 import { getDenBySlug } from "./db.js";
 import { DenRoom } from "./den-room.js";
 import { VoiceDen } from "./voice/voice-den.js";
@@ -26,8 +26,10 @@ function withSecurityHeaders(response) {
   return res;
 }
 
-function html(markup, status = 200) {
-  return new Response(markup, { status, headers: { "content-type": "text/html; charset=utf-8" } });
+function html(markup, status = 200, setCookie = null) {
+  const headers = { "content-type": "text/html; charset=utf-8" };
+  if (setCookie) headers["set-cookie"] = setCookie;
+  return new Response(markup, { status, headers });
 }
 
 async function handleWsUpgrade(request, env, url, slug) {
@@ -185,27 +187,30 @@ export default {
         );
       }
 
+      // Page GETs use resolveOrRecoverIdentity (login recovery, 0009): a
+      // returning email with no cookie is silently signed back into THEIR
+      // account (the Access edge already OTP-verified the email upstream).
       if (path === "/") {
-        const identity = await resolveIdentity(request, env);
-        return withSecurityHeaders(html(homePage(identity?.user || null)));
+        const { identity, setCookie } = await resolveOrRecoverIdentity(request, env);
+        return withSecurityHeaders(html(homePage(identity?.user || null), 200, setCookie));
       }
 
       // Credit storefront + return page (phase 1 monetisation).
       if (path === "/pay" || path === "/pay/") {
-        const identity = await resolveIdentity(request, env);
-        return withSecurityHeaders(html(payPage(identity?.user || null, env)));
+        const { identity, setCookie } = await resolveOrRecoverIdentity(request, env);
+        return withSecurityHeaders(html(payPage(identity?.user || null, env), 200, setCookie));
       }
       if (path === "/pay/thanks") {
-        const identity = await resolveIdentity(request, env);
-        return withSecurityHeaders(html(payThanksPage(identity?.user || null)));
+        const { identity, setCookie } = await resolveOrRecoverIdentity(request, env);
+        return withSecurityHeaders(html(payThanksPage(identity?.user || null), 200, setCookie));
       }
 
       const denMatch = path.match(/^\/den\/([a-z0-9][a-z0-9-]{1,39})$/);
       if (denMatch) {
         const den = await getDenBySlug(env.DB, denMatch[1]);
         if (!den) return withSecurityHeaders(html(notFoundPage(), 404));
-        const identity = await resolveIdentity(request, env);
-        return withSecurityHeaders(html(denPage(den, identity?.user || null)));
+        const { identity, setCookie } = await resolveOrRecoverIdentity(request, env);
+        return withSecurityHeaders(html(denPage(den, identity?.user || null), 200, setCookie));
       }
 
       return withSecurityHeaders(html(notFoundPage(), 404));
