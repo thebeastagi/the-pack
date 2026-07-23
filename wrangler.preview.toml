@@ -20,7 +20,7 @@ routes = [
 ]
 
 [vars]
-PACK_VERSION = "0.9.4-preview-avatars"  # AV: deterministic wolf avatars (star-wolf AI / human-wolf human) + roster panel (2026-07-23)
+PACK_VERSION = "0.9.5-preview-avatars"  # AV fix: __name shim for esbuild keepNames in serialized client JS
 # ── native auth (M1, PREVIEW-ONLY posture) ─────────────────────────────────
 # AUTH_MODE: "access" (default when absent — prod behavior) | "native".
 # Preview runs native; the Access edge app on pack-preview stays UP, so the

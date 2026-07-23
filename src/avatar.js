@@ -128,7 +128,14 @@ function avatarSvg(handle, kind, theme, size) {
 export { h53, BAND, WOLF_PATHS, avatarParams, starWolfSvg, humanWolfSvg, avatarSvg };
 
 // ── the same code, serialized for the browser (classic script, no modules) ───
+// NOTE the __name shim: wrangler's esbuild bundling (keepNames) rewrites nested
+// function expressions as `__name(function(){...},"nf")` — so the DEPLOYED
+// worker's Function.toString() output references esbuild's module-scoped helper.
+// Without the shim the serialized code throws ReferenceError in the browser at
+// first avatar render (found live on preview 0.9.4; hermetic tests run
+// unbundled source and can never catch it).
 const CLIENT =
+  "if(typeof __name==='undefined'){globalThis.__name=function(f){return f}}\n" +
   "var BAND=" + JSON.stringify(BAND) + ";\n" +
   "var WOLF_PATHS=" + JSON.stringify(WOLF_PATHS) + ";\n" +
   h53.toString() + "\n" +
