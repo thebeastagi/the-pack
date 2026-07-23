@@ -1,6 +1,8 @@
 // the-pack — REST API. Same-origin JSON; agents use Bearer pk_ keys.
 import * as db from "./db.js";
-import { accessEmail, clearSessionCookieHeader, issueSession, recoverUserByEmail, resolveIdentity, sessionCookieHeader } from "./auth.js";
+import { authMode, clearSessionCookieHeader, issueSession, recoverUserByEmail, resolveIdentity, sessionCookieHeader, verifiedEmail } from "./auth.js";
+import { consumeClaimTicket, handleAuthStart, handleAuthVerify, peekClaimTicket, turnstileStatus } from "./auth-native.js";
+import { emailStatus } from "./email.js";
 import { memoryConfigFromEnv, searchEpisodes } from "./memory.js";
 import { PROVENANCE_ALG, PROVENANCE_KEY_ID, publicKeyJwk } from "./aevs.js";
 import { recordPackEpisode } from "./episodes.js";
@@ -75,6 +77,11 @@ export async function handleApi(request, env, url, ctx = null) {
       ok: true,
       service: "the-pack",
       version: env.PACK_VERSION || "dev",
+      auth: {
+        mode: authMode(env), // "access" (CF edge) | "native" (worker OTP)
+        turnstile: turnstileStatus(env),
+        email: emailStatus(env),
+      },
       features: {
         agentverse_memory: Boolean(memoryConfigFromEnv(env)),
         provenance_signing: Boolean(publicKeyJwk(env)),
@@ -92,6 +99,25 @@ export async function handleApi(request, env, url, ctx = null) {
           : [],
       },
     });
+  }
+
+  // ── native email-OTP auth (M1; active only when AUTH_MODE=native) ────────
+  if (path === "/api/auth/start" && method === "POST") return handleAuthStart(request, env);
+  if (path === "/api/auth/verify" && method === "POST") return handleAuthVerify(request, env);
+
+  // Dev-only stub outbox reader (E2E fetches its own OTP codes). Exists ONLY
+  // when EMAIL_PROVIDER=stub; ADMIN_TOKEN-gated; 404-cloaked like voice-kill.
+  if (path === "/api/admin/dev-mail" && method === "GET") {
+    const { emailProvider } = await import("./email.js");
+    if (emailProvider(env) !== "stub") return apiError(404, "not_found", "Not found.");
+    const admin = env.ADMIN_TOKEN || "";
+    const given = request.headers.get("x-admin-token") || "";
+    if (!admin || !safeEqualHex(await sha256Hex(given), await sha256Hex(admin))) {
+      return apiError(404, "not_found", "Not found.");
+    }
+    const email = clampStr(url.searchParams.get("email"), 120).toLowerCase();
+    if (!EMAIL_RE.test(email)) return apiError(400, "bad_email", "That email doesn't look right.");
+    return json({ ok: true, provider: "stub", mail: await db.listDevMail(env.DB, email) });
   }
 
   // ── provenance (ES256 / P-256, AEVS-compatible scheme) ───────────────────
@@ -245,14 +271,30 @@ export async function handleApi(request, env, url, ctx = null) {
     if (typedEmail && !EMAIL_RE.test(typedEmail)) return apiError(400, "bad_email", "That email doesn't look right.");
     const existing = await db.getUserByHandle(env.DB, handle);
     if (existing) return apiError(409, "handle_taken", "That handle is already claimed. Try another.");
-    // Login recovery (0009): the Access edge already OTP-verified this email —
-    // it becomes the account's permanent recovery credential. One verified
-    // email = ONE username (Robin's rule): a second claim from the same email
-    // is refused and pointed at recovery instead of minting a duplicate.
-    const verifiedEmail = accessEmail(request);
-    if (verifiedEmail) {
-      const bound = await db.getUserByVerifiedEmail(env.DB, verifiedEmail);
+    // Login recovery (0009): a VERIFIED email is the account's permanent
+    // recovery credential; one verified email = ONE username (Robin's rule).
+    // WHO verified it depends on AUTH_MODE:
+    //   access — the CF Access edge OTP'd it (trusted header, set at the edge)
+    //   native — the worker OTP'd it; proof = one-time claim ticket from
+    //            /api/auth/verify. REQUIRED in native mode (anti-squat is
+    //            structural: no verified email, no handle). The Access header
+    //            is ignored unconditionally here (verifiedEmail chokepoint).
+    let boundEmail = null;
+    let ticketRow = null;
+    if (authMode(env) === "native") {
+      ticketRow = await peekClaimTicket(env, typeof body.claimTicket === "string" ? body.claimTicket : "");
+      if (!ticketRow) {
+        return apiError(403, "claim_ticket_required", "Verify your email first — request a code, enter it, then claim your username.");
+      }
+      boundEmail = ticketRow.email;
+    } else {
+      boundEmail = verifiedEmail(request, env);
+    }
+    if (boundEmail) {
+      const bound = await db.getUserByVerifiedEmail(env.DB, boundEmail);
       if (bound) {
+        // Native: ticket deliberately NOT consumed — the client re-presents it
+        // to /api/session/recover ("signing you back in", same UX as access mode).
         return apiError(
           409,
           "email_bound",
@@ -260,34 +302,53 @@ export async function handleApi(request, env, url, ctx = null) {
         );
       }
     }
+    // Native: burn the ticket exactly once, at the point of account creation.
+    if (ticketRow && !(await consumeClaimTicket(env, ticketRow.id))) {
+      return apiError(403, "claim_ticket_required", "That email verification was already used — request a new code.");
+    }
     const user = await db.createUser(env.DB, {
       handle,
       displayName,
-      // Verified (Access) email wins over the typed one — it's the one that
+      // Verified email wins over the typed one — it's the one that
       // deterministically recovers this account. Typed-only stays unverified.
-      email: verifiedEmail || typedEmail || null,
-      emailVerifiedAt: verifiedEmail ? new Date().toISOString() : null,
+      email: boundEmail || typedEmail || null,
+      emailVerifiedAt: boundEmail ? new Date().toISOString() : null,
     });
     const { token, expiresAt } = await issueSession(env, user.id, request.headers.get("user-agent") || "");
     return json(
-      { ok: true, user: db.publicUser(user), emailBound: Boolean(verifiedEmail) },
+      { ok: true, user: db.publicUser(user), emailBound: Boolean(boundEmail) },
       { status: 201, headers: { "set-cookie": sessionCookieHeader(token, expiresAt) } },
     );
   }
 
-  // Re-login: the Access edge proved the caller owns this email (one-time
-  // code) — hand back THEIR account + a fresh session. No body needed.
+  // Re-login: the caller has PROVEN email ownership — hand back THEIR account
+  // + a fresh session. Proof by mode: access = Access edge header (no body);
+  // native = one-time claim ticket in the body (from /api/auth/verify — used
+  // by the UI when a claim collapses into 409 email_bound). In native mode
+  // the normal re-login path is /api/auth/verify itself.
   if (path === "/api/session/recover" && method === "POST") {
     if (!softRateLimit(`recover:${clientIp(request)}`, 20, 3600_000)) {
       return apiError(429, "rate_limited", "Too many recovery attempts from this network. Try later.");
     }
-    const email = accessEmail(request);
+    let email = null;
+    let ticketRow = null;
+    if (authMode(env) === "native") {
+      const body = await readBody(request);
+      ticketRow = await peekClaimTicket(env, typeof body?.claimTicket === "string" ? body.claimTicket : "");
+      email = ticketRow?.email || null;
+    } else {
+      email = verifiedEmail(request, env);
+    }
     if (!email) {
-      return apiError(400, "no_verified_email", "Recovery uses the email you verified at the gate — sign in through the email gate first.");
+      return apiError(400, "no_verified_email", "Recovery needs a verified email — request a sign-in code first.");
     }
     const user = await recoverUserByEmail(env, email);
     if (!user) {
       return apiError(404, "no_account", "No pack account is bound to that email yet — claim a username to join.");
+    }
+    // Native: the ticket is single-use — burn it on successful recovery only.
+    if (ticketRow && !(await consumeClaimTicket(env, ticketRow.id))) {
+      return apiError(400, "no_verified_email", "That email verification was already used — request a new code.");
     }
     await db.touchUser(env.DB, user.id);
     const { token, expiresAt } = await issueSession(env, user.id, request.headers.get("user-agent") || "");

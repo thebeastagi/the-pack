@@ -37,6 +37,7 @@ test("health", async () => {
     ok: true,
     service: "the-pack",
     version: "test",
+    auth: { mode: "access", turnstile: "missing", email: "unconfigured" },
     features: {
       agentverse_memory: false,
       provenance_signing: false,

@@ -9,6 +9,7 @@ export function createFakeD1() {
     users: [], sessions: [], agent_keys: [], dens: [], den_members: [], messages: [],
     voice_usage: [], voice_flags: [], brain_usage: [], den_collections: [], den_docs: [], voice_usage_den: [],
     credit_balances: [], credit_ledger: [], payment_orders: [],
+    auth_challenges: [], dev_outbox: [],
   };
   const clone = (r) => (r ? structuredClone(r) : r);
   const handlers = {
@@ -48,6 +49,72 @@ export function createFakeD1() {
           u.email_verified_at = a[1];
         }
       },
+    },
+    // ── native email-OTP auth (0010) ────────────────────────────────────
+    [SQL.authChallengeInsert]: {
+      run(a) {
+        t.auth_challenges.push({
+          id: a[0], kind: a[1], email: a[2], code_hash: a[3], ip: a[4],
+          attempts: 0, created_at: a[5], expires_at: a[6], consumed_at: null,
+        });
+      },
+    },
+    [SQL.authChallengeActiveByEmail]: {
+      first: (a) =>
+        clone(
+          t.auth_challenges
+            .filter((c) => c.kind === a[0] && c.email.toLowerCase() === a[1].toLowerCase() && !c.consumed_at)
+            .sort((x, y) => (x.created_at < y.created_at ? 1 : -1))[0],
+        ),
+    },
+    [SQL.authChallengeById]: { first: (a) => clone(t.auth_challenges.find((c) => c.id === a[0])) },
+    [SQL.authChallengeBumpAttempts]: {
+      run(a) {
+        const c = t.auth_challenges.find((x) => x.id === a[0]);
+        if (c) c.attempts += 1;
+      },
+    },
+    [SQL.authChallengeConsume]: {
+      run(a) {
+        const c = t.auth_challenges.find((x) => x.id === a[1] && !x.consumed_at);
+        if (!c) return { changes: 0 }; // the one-time gate
+        c.consumed_at = a[0];
+        return { changes: 1 };
+      },
+    },
+    [SQL.authChallengeInvalidate]: {
+      run(a) {
+        let n = 0;
+        for (const c of t.auth_challenges) {
+          if (c.kind === a[1] && c.email.toLowerCase() === a[2].toLowerCase() && !c.consumed_at) {
+            c.consumed_at = a[0];
+            n++;
+          }
+        }
+        return { changes: n };
+      },
+    },
+    [SQL.authSendsByEmailSince]: {
+      first: (a) => ({ n: t.auth_challenges.filter((c) => c.kind === "otp" && c.email.toLowerCase() === a[0].toLowerCase() && c.created_at >= a[1]).length }),
+    },
+    [SQL.authSendsByIpSince]: {
+      first: (a) => ({ n: t.auth_challenges.filter((c) => c.kind === "otp" && c.ip === a[0] && c.created_at >= a[1]).length }),
+    },
+    [SQL.authSendsGlobalSince]: {
+      first: (a) => ({ n: t.auth_challenges.filter((c) => c.kind === "otp" && c.created_at >= a[0]).length }),
+    },
+    [SQL.devMailInsert]: {
+      run(a) {
+        t.dev_outbox.push({ id: a[0], email: a[1], subject: a[2], body: a[3], created_at: a[4] });
+      },
+    },
+    [SQL.devMailByEmail]: {
+      all: (a) =>
+        t.dev_outbox
+          .filter((m) => m.email.toLowerCase() === a[0].toLowerCase())
+          .sort((x, y) => (x.created_at < y.created_at ? 1 : -1))
+          .slice(0, 5)
+          .map(clone),
     },
     [SQL.touchUser]: {
       run(a) {

@@ -1,5 +1,7 @@
 // the-pack — server-rendered pages. D1 "The Pack" brand kit v1.0
 // (obsidian scale, violet→cyan gradient, den-fire reserved, honest presence).
+import { authMode } from "./auth.js";
+import { turnstileIsTestKeys, turnstileSiteKey } from "./auth-native.js";
 import { escapeHtml } from "./util.js";
 
 const CSS = `
@@ -171,7 +173,12 @@ ${identity ? `<script>(async()=>{try{const r=await fetch('/api/credits');const d
 </html>`;
 }
 
-export function homePage(identity) {
+export function homePage(identity, env = {}) {
+  // Native auth (AUTH_MODE=native): the worker is the gate. Signed-out
+  // visitors see the email→code login card first; the claim card appears only
+  // after a verify that returns needsClaim (new email). Access mode renders
+  // exactly the pre-M1 page.
+  const native = authMode(env) === "native";
   // Fresh claim (<10 min old account) greets "Welcome"; every later visit
   // greets "Welcome back" — the recovery promise made visible.
   const freshClaim =
@@ -192,6 +199,49 @@ export function homePage(identity) {
          <div><label for="dn">display name (optional)</label><input id="dn" name="displayName" maxlength="40" placeholder="Night Wolf"></div>
          <div><button class="btn" type="submit">Join the pack</button><div class="error" id="claim-err"></div></div>
        </form></div>`;
+
+  // Native login card (email → one-time code → session or claim ticket).
+  const tsSiteKey = turnstileSiteKey(env);
+  const tsTestBanner = turnstileIsTestKeys(env)
+    ? `<p style="color:var(--warn,#e0a458);font:600 12px/16px var(--font-m);border:1px dashed var(--warn,#e0a458);border-radius:8px;padding:8px 10px;margin-bottom:12px">⚠️ TEST MODE — Turnstile is running Cloudflare's documented always-pass TEST keys. Dev/preview only, not real bot protection.</p>`
+    : "";
+  const gate =
+    native && !identity
+      ? `<div class="card" id="gate">
+       <h2 class="sec" style="margin-top:0">Enter the pack</h2>
+       <p style="color:var(--text-muted);font-size:14px;margin-bottom:12px">No passwords. Type your email, we send a one-time code, you're in — new or returning, same door.</p>
+       ${tsTestBanner}
+       <form id="otp-start" class="grid" style="gap:12px">
+         <div><label for="ge">email</label><input id="ge" name="email" type="email" required maxlength="120" placeholder="you@example.com" autocomplete="email"></div>
+         <div class="cf-turnstile" data-sitekey="${escapeHtml(tsSiteKey)}"></div>
+         <div><button class="btn" type="submit">Email me a code</button><div class="error" id="gate-err"></div></div>
+       </form>
+       <form id="otp-verify" class="grid" style="gap:12px;display:none;margin-top:12px">
+         <div><label for="gc">the 6-digit code from your email</label><input id="gc" name="code" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" required placeholder="000000" autocomplete="one-time-code"></div>
+         <div><button class="btn" type="submit">Enter</button><div class="error" id="verify-err"></div></div>
+       </form>
+     </div>
+     <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`
+      : "";
+  // In native mode the claim card stays hidden until a verify says needsClaim
+  // (the claim ticket in hand proves email ownership — anti-squat).
+  const claimBlock = native && !identity ? `<div id="claim-wrap" style="display:none">${claim}</div>` : claim;
+
+  const nativeScript =
+    native && !identity
+      ? `
+const sf=$('#otp-start'),vf=$('#otp-verify');let GEMAIL='';
+if(sf)sf.addEventListener('submit',async(e)=>{e.preventDefault();$('#gate-err').textContent='';
+  const tEl=sf.querySelector('[name=cf-turnstile-response]');
+  const{d}=await api('/api/auth/start',{method:'POST',body:JSON.stringify({email:$('#ge').value.trim(),turnstileToken:tEl?tEl.value:''})});
+  if(d.ok){GEMAIL=$('#ge').value.trim().toLowerCase();$('#otp-verify').style.display='';$('#gc').focus()}
+  else $('#gate-err').textContent=(d.error&&d.error.message)||'Something went wrong.'});
+if(vf)vf.addEventListener('submit',async(e)=>{e.preventDefault();$('#verify-err').textContent='';
+  const{d}=await api('/api/auth/verify',{method:'POST',body:JSON.stringify({email:GEMAIL,code:$('#gc').value.trim()})});
+  if(d.ok&&d.needsClaim){CT=d.claimTicket;$('#gate').style.display='none';const w=document.getElementById('claim-wrap');if(w)w.style.display=''}
+  else if(d.ok){location.reload()}
+  else $('#verify-err').textContent=(d.error&&d.error.message)||'Something went wrong.'});`
+      : "";
 
   const bring = `
 <h2 class="sec">Bring your agent to the fire</h2>
@@ -234,7 +284,7 @@ export function homePage(identity) {
   <p class="lead">Talk with AI agents that <b>remember</b> — by text or live voice, in rooms around a fire (we call them <b>dens</b>), where humans and AI hang out as equals.</p>
   <p class="phase">free to join · no passwords — just your email · text + live voice rooms</p>
 </section>
-${claim}
+${gate}${claimBlock}
 <h2 class="sec">Dens — live rooms</h2>
 <div class="den-list" id="dens"><div class="card" style="color:var(--text-dim);font:500 12px/16px var(--font-m)">loading live rooms…</div></div>
 ${create}
@@ -260,12 +310,15 @@ function renderDens(list){
 }
 async function loadDens(){const{d}=await api('/api/dens');if(d.ok)renderDens(d.dens)}
 loadDens();setInterval(loadDens,15000);
+let CT=null;${nativeScript}
 const cf=$('#claim');
 if(cf)cf.addEventListener('submit',async(e)=>{e.preventDefault();$('#claim-err').textContent='';
-  const{r,d}=await api('/api/handles',{method:'POST',body:JSON.stringify({handle:$('#h').value.trim(),displayName:$('#dn').value.trim()})});
+  const cb={handle:$('#h').value.trim(),displayName:$('#dn').value.trim()};
+  if(CT)cb.claimTicket=CT;
+  const{r,d}=await api('/api/handles',{method:'POST',body:JSON.stringify(cb)});
   if(d.ok){location.reload();return}
   if(d.error&&d.error.code==='email_bound'){
-    const{d:rec}=await api('/api/session/recover',{method:'POST'});
+    const{d:rec}=await api('/api/session/recover',{method:'POST',body:JSON.stringify(CT?{claimTicket:CT}:{})});
     if(rec.ok){location.reload();return}
   }
   $('#claim-err').textContent=(d.error&&d.error.message)||'Something went wrong.'});

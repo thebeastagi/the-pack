@@ -107,6 +107,31 @@ export const SQL = {
     "UPDATE payment_orders SET status = 'settled', settled_at = ? WHERE id = ? AND status = 'created'",
   paymentOrdersRecent:
     "SELECT id, provider, provider_ref, order_ref, sku, amount_cents, credits, status, created_at, settled_at FROM payment_orders WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+
+  // ── native email-OTP auth (migration 0010) ──────────────────────────────
+  // Challenges are D1 rows, never KV (one-time codes need strong consistency).
+  // Rows also serve as the send-rate ledger: counters below count rows in a
+  // time window, so superseded/consumed challenges still count as sends.
+  authChallengeInsert:
+    "INSERT INTO auth_challenges (id, kind, email, code_hash, ip, attempts, created_at, expires_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+  authChallengeActiveByEmail:
+    "SELECT * FROM auth_challenges WHERE kind = ? AND lower(email) = lower(?) AND consumed_at IS NULL ORDER BY created_at DESC LIMIT 1",
+  authChallengeById: "SELECT * FROM auth_challenges WHERE id = ?",
+  // Write-FIRST attempt accounting: bump before comparing, so a crash between
+  // bump and compare can only over-count (never hands out a free guess).
+  authChallengeBumpAttempts: "UPDATE auth_challenges SET attempts = attempts + 1 WHERE id = ?",
+  // One-time consume gate: a raced double-consume changes 0 rows.
+  authChallengeConsume: "UPDATE auth_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL",
+  authChallengeInvalidate:
+    "UPDATE auth_challenges SET consumed_at = ? WHERE kind = ? AND lower(email) = lower(?) AND consumed_at IS NULL",
+  authSendsByEmailSince:
+    "SELECT COUNT(*) AS n FROM auth_challenges WHERE kind = 'otp' AND lower(email) = lower(?) AND created_at >= ?",
+  authSendsByIpSince: "SELECT COUNT(*) AS n FROM auth_challenges WHERE kind = 'otp' AND ip = ? AND created_at >= ?",
+  authSendsGlobalSince: "SELECT COUNT(*) AS n FROM auth_challenges WHERE kind = 'otp' AND created_at >= ?",
+
+  // Dev outbox (stub email sender only — see src/email.js).
+  devMailInsert: "INSERT INTO dev_outbox (id, email, subject, body, created_at) VALUES (?, ?, ?, ?, ?)",
+  devMailByEmail: "SELECT * FROM dev_outbox WHERE lower(email) = lower(?) ORDER BY created_at DESC LIMIT 5",
 };
 
 export async function createUser(db, { handle, displayName = "", email = null, emailVerifiedAt = null, kind = "human" }) {
@@ -164,6 +189,48 @@ export async function getSession(db, tokenHash) {
 
 export async function deleteSession(db, tokenHash) {
   await db.prepare(SQL.deleteSession).bind(tokenHash).run();
+}
+
+// ── native email-OTP auth (0010) ─────────────────────────────────────────
+export async function createAuthChallenge(db, { id, kind, email, codeHash, ip = null, expiresAt }) {
+  await db.prepare(SQL.authChallengeInsert).bind(id, kind, email, codeHash, ip, nowIso(), expiresAt).run();
+}
+
+export async function getActiveAuthChallenge(db, kind, email) {
+  return db.prepare(SQL.authChallengeActiveByEmail).bind(kind, email).first();
+}
+
+export async function getAuthChallengeById(db, id) {
+  return db.prepare(SQL.authChallengeById).bind(id).first();
+}
+
+export async function bumpAuthChallengeAttempts(db, id) {
+  await db.prepare(SQL.authChallengeBumpAttempts).bind(id).run();
+}
+
+/** One-time consume; false when already consumed (race lost). */
+export async function consumeAuthChallenge(db, id) {
+  const res = await db.prepare(SQL.authChallengeConsume).bind(nowIso(), id).run();
+  return (res?.meta?.changes ?? 0) > 0;
+}
+
+export async function invalidateAuthChallenges(db, kind, email) {
+  await db.prepare(SQL.authChallengeInvalidate).bind(nowIso(), kind, email).run();
+}
+
+export async function countAuthSends(db, { email = null, ip = null, since }) {
+  if (email !== null) return (await db.prepare(SQL.authSendsByEmailSince).bind(email, since).first())?.n ?? 0;
+  if (ip !== null) return (await db.prepare(SQL.authSendsByIpSince).bind(ip, since).first())?.n ?? 0;
+  return (await db.prepare(SQL.authSendsGlobalSince).bind(since).first())?.n ?? 0;
+}
+
+export async function insertDevMail(db, { email, subject, body }) {
+  await db.prepare(SQL.devMailInsert).bind(uuid(), email, subject, body, nowIso()).run();
+}
+
+export async function listDevMail(db, email) {
+  const res = await db.prepare(SQL.devMailByEmail).bind(email).all();
+  return res?.results ?? [];
 }
 
 export async function createAgentKey(db, { keyHash, userId, label = "" }) {

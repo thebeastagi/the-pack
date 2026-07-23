@@ -1,6 +1,6 @@
 // the-pack — Worker entry. Pages + REST + per-den WebSocket forwarding.
 import { handleApi } from "./api.js";
-import { accessGateApplies, accessGateOk, resolveIdentity, resolveOrRecoverIdentity } from "./auth.js";
+import { accessGateApplies, accessGateOk, authMode, resolveIdentity, resolveOrRecoverIdentity } from "./auth.js";
 import { getDenBySlug } from "./db.js";
 import { DenRoom } from "./den-room.js";
 import { VoiceDen } from "./voice/voice-den.js";
@@ -10,19 +10,29 @@ import { apiError, clientIp, escapeHtml, softRateLimit } from "./util.js";
 
 export { DenRoom, VoiceDen };
 
-const SECURITY_HEADERS = {
-  "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
-  "x-content-type-options": "nosniff",
-  "referrer-policy": "no-referrer",
-  "content-security-policy":
-    "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' wss:; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'",
-};
+// CSP is mode-aware: native auth (AUTH_MODE=native) embeds the Turnstile
+// widget on the home page, which needs its script + iframe from
+// challenges.cloudflare.com. Access mode keeps the original strict CSP.
+function securityHeaders(env) {
+  const native = authMode(env) === "native";
+  return {
+    "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+    "content-security-policy":
+      "default-src 'self'; " +
+      (native ? "script-src 'unsafe-inline' https://challenges.cloudflare.com; " : "script-src 'unsafe-inline'; ") +
+      "style-src 'unsafe-inline'; connect-src 'self' wss:; img-src 'self' data:; " +
+      (native ? "frame-src https://challenges.cloudflare.com; " : "") +
+      "frame-ancestors 'none'; base-uri 'self'",
+  };
+}
 
-function withSecurityHeaders(response) {
+function withSecurityHeaders(response, env = {}) {
   // 101 Switching Protocols responses must pass through untouched.
   if (response.status === 101) return response;
   const res = new Response(response.body, response);
-  for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.headers.set(k, v);
+  for (const [k, v] of Object.entries(securityHeaders(env))) res.headers.set(k, v);
   return res;
 }
 
@@ -192,28 +202,28 @@ export default {
       // account (the Access edge already OTP-verified the email upstream).
       if (path === "/") {
         const { identity, setCookie } = await resolveOrRecoverIdentity(request, env);
-        return withSecurityHeaders(html(homePage(identity?.user || null), 200, setCookie));
+        return withSecurityHeaders(html(homePage(identity?.user || null, env), 200, setCookie), env);
       }
 
       // Credit storefront + return page (phase 1 monetisation).
       if (path === "/pay" || path === "/pay/") {
         const { identity, setCookie } = await resolveOrRecoverIdentity(request, env);
-        return withSecurityHeaders(html(payPage(identity?.user || null, env), 200, setCookie));
+        return withSecurityHeaders(html(payPage(identity?.user || null, env), 200, setCookie), env);
       }
       if (path === "/pay/thanks") {
         const { identity, setCookie } = await resolveOrRecoverIdentity(request, env);
-        return withSecurityHeaders(html(payThanksPage(identity?.user || null), 200, setCookie));
+        return withSecurityHeaders(html(payThanksPage(identity?.user || null), 200, setCookie), env);
       }
 
       const denMatch = path.match(/^\/den\/([a-z0-9][a-z0-9-]{1,39})$/);
       if (denMatch) {
         const den = await getDenBySlug(env.DB, denMatch[1]);
-        if (!den) return withSecurityHeaders(html(notFoundPage(), 404));
+        if (!den) return withSecurityHeaders(html(notFoundPage(), 404), env);
         const { identity, setCookie } = await resolveOrRecoverIdentity(request, env);
-        return withSecurityHeaders(html(denPage(den, identity?.user || null), 200, setCookie));
+        return withSecurityHeaders(html(denPage(den, identity?.user || null), 200, setCookie), env);
       }
 
-      return withSecurityHeaders(html(notFoundPage(), 404));
+      return withSecurityHeaders(html(notFoundPage(), 404), env);
     } catch (err) {
       return withSecurityHeaders(apiError(500, "internal", "Something broke. The pack has been notified."));
     }

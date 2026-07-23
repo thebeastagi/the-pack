@@ -20,7 +20,24 @@ routes = [
 ]
 
 [vars]
-PACK_VERSION = "0.8.0-preview"           # 0.8.0 (2026-07-23): login recovery — email-to-username permanent binding (migration 0009)
+PACK_VERSION = "0.9.0-preview-native-auth"  # M1 (2026-07-23): Workers-native email-OTP auth behind AUTH_MODE flag
+# ── native auth (M1, PREVIEW-ONLY posture) ─────────────────────────────────
+# AUTH_MODE: "access" (default when absent — prod behavior) | "native".
+# Preview runs native; the Access edge app on pack-preview stays UP, so the
+# public still can't reach signup — E2E enters via the-pack-ci service token.
+AUTH_MODE = "native"
+# Stub sender: OTP "mail" lands in D1 dev_outbox (read via admin dev-mail
+# endpoint). Real provider = Robin decision R1; flip is EMAIL_PROVIDER +
+# `wrangler secret put EMAIL_API_KEY` + EMAIL_FROM. Stub sends NO real email.
+EMAIL_PROVIDER = "stub"
+# Cloudflare's DOCUMENTED always-pass TEST keys (developers.cloudflare.com/
+# turnstile/troubleshooting/testing/). These are public constants, NOT secrets
+# — which is the only reason a *_SECRET_KEY may live in this file. The real
+# widget secret (Robin decision R2) MUST be `wrangler secret put
+# TURNSTILE_SECRET_KEY`, never a var. Health + login page banner scream
+# "test-keys" while these are in place.
+TURNSTILE_SITE_KEY = "1x00000000000000000000AA"
+TURNSTILE_SECRET_KEY = "1x0000000000000000000000000000000AA"
 # Access gate stays ON post-launch (2026-07-21 public flip): the main app policy
 # is now "everyone" — any email via one-time code. Verified email = signup + abuse
 # guard. Full lift (no gate at all) = "0" + redeploy + remove/disable the main app.

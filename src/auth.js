@@ -21,11 +21,32 @@ const SESSION_TTL_MS = 30 * 24 * 3600 * 1000;
 // cutoff are never recovery targets.
 const LEGACY_EMAIL_CUTOFF = "2026-07-23T00:00:00.000Z";
 
+// ── native auth mode (M1, 2026-07-23) ─────────────────────────────────────
+// AUTH_MODE selects WHO verifies emails:
+//   "access" (default) — the CF Access edge OTP + cf-access-* headers (as-is)
+//   "native"           — the worker itself (/api/auth/start|verify, D1 OTP
+//                        challenges, Turnstile; src/auth-native.js)
+// CRITICAL INVARIANT: in native mode the Access app is expected to be OFF the
+// domain, which makes cf-access-* headers CLIENT-SPOOFABLE. Native mode must
+// therefore ignore them UNCONDITIONALLY — verifiedEmail() below is the single
+// chokepoint enforcing that; nothing else may read the header for identity.
+export function authMode(env) {
+  return env.AUTH_MODE === "native" ? "native" : "access";
+}
+
 /** Verified email from the Access edge, lowercased — or null. */
 export function accessEmail(request) {
   const raw = (request.headers.get("cf-access-authenticated-user-email") || "").trim().toLowerCase();
   if (!raw || raw.length > 120 || !EMAIL_RE.test(raw)) return null;
   return raw;
+}
+
+/** Mode-aware verified email for THIS request. In native mode the Access
+ *  header is radioactive (spoofable once the edge app is gone) → always null;
+ *  native email proof travels as claim tickets, never headers. */
+export function verifiedEmail(request, env) {
+  if (authMode(env) === "native") return null;
+  return accessEmail(request);
 }
 
 /** email → its ONE bound account (verified first, then legacy promote). Null if none. */
@@ -49,7 +70,9 @@ export async function recoverUserByEmail(env, email) {
 export async function resolveOrRecoverIdentity(request, env) {
   const identity = await resolveIdentity(request, env);
   if (identity) return { identity, setCookie: null };
-  const email = accessEmail(request);
+  // Mode-aware: in native mode there is no trusted header → no silent resume
+  // (the 30-day cookie IS the resume; cookie gone = email+code round-trip).
+  const email = verifiedEmail(request, env);
   if (!email) return { identity: null, setCookie: null };
   const user = await recoverUserByEmail(env, email);
   if (!user) return { identity: null, setCookie: null };
@@ -135,6 +158,10 @@ const ACCESS_BYPASS_PATHS = [
 ];
 
 export function accessGateApplies(env, path, request) {
+  // Native mode: the worker IS the gate (session/pk_ auth on every mutating
+  // route); the Access-header edge gate no longer applies. Public reads stay
+  // public by design (same as the pre-flip public launch posture).
+  if (authMode(env) === "native") return false;
   if (env.PRIVATE_BETA !== "1") return false;
   if (path === "/api/health" || path === "/api/admin/voice-kill" || path === "/api/aevs/pubkey") return false;
   if (ACCESS_BYPASS_PATHS.some((re) => re.test(path))) return false;
