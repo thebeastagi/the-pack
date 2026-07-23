@@ -45,7 +45,7 @@ function loadState() {
   return existsSync(STATE_FILE) ? JSON.parse(readFileSync(STATE_FILE, "utf8")) : { grokCalls: 0, http: { ok: 0, err: 0, deliberate429: 0 } };
 }
 function saveState(s) {
-  mkdirSync("/tmp/p1", { recursive: true });
+  mkdirSync(STATE_FILE.replace(/\/[^/]+$/, ""), { recursive: true });
   writeFileSync(STATE_FILE, JSON.stringify(s, null, 2), { mode: 0o600 });
 }
 function metric(name, den, ms, extra = {}) {
@@ -458,6 +458,170 @@ async function liveness() {
   }
 }
 
+// ── P2 additions (2026-07-23, Agentverse Premium quota_agents=25) ──────────
+
+// quota: CONFIRMED hosted-agent quota straight from the Agentverse API.
+async function quota() {
+  const u = await av("", {}); // list (paged)
+  const usage = await fetch("https://agentverse.ai/v1/hosting/usage/current", {
+    headers: { authorization: `Bearer ${avKey}` },
+  }).then((r) => r.json());
+  const items = u.body?.items || [];
+  log(`hosted agents on account: ${usage.num_agents} / quota_agents=${usage.quota_agents} (window expiry ${usage.expiry})`);
+  for (const a of items) log(`  - ${a.name} running=${a.running}`);
+}
+
+// seedp2: den A = TWO Grok citizens (twin-flame personas that always @mention
+// each other) + 2 stub wolves; den B = one citizen + 2 stub wolves.
+async function seedp2() {
+  if (!admin || !svcId) throw new Error("need PACK_ADMIN_TOKEN + CF_ACCESS_CLIENT_ID/SECRET");
+  if (!avKey) throw new Error("need AGENTVERSE_API_KEY");
+  const tag = opt("tag", Date.now().toString(36).slice(-4));
+  state.tag = tag;
+  state.dens = {};
+  const mk = async (h) => {
+    const r = await api("/api/admin/agents", { method: "POST", headers: { "x-admin-token": admin }, body: { handle: h } });
+    if (r.status !== 201 && r.status !== 200) throw new Error(`mint ${h} failed: ${r.status} ${JSON.stringify(r.body)?.slice(0, 120)}`);
+    return r.body.key;
+  };
+  const connect = async (handle, displayName, slug, persona) => {
+    const cn = await api("/api/agents/connect", {
+      method: "POST",
+      body: { handle, displayName, agentverseApiKey: avKey, denSlug: slug, persona },
+    });
+    if (cn.status !== 201) throw new Error(`citizen connect ${handle} failed: ${cn.status} ${JSON.stringify(cn.body)?.slice(0, 200)}`);
+    log(`citizen connected: ${handle} -> ${cn.body.hosted.address} started=${cn.body.hosted.started}`);
+    return { handle, key: cn.body.packKey, address: cn.body.hosted.address, started: cn.body.hosted.started };
+  };
+  const dens = [
+    { dk: "a", slug: `load-p2a-${tag}`, wolves: ["wolf-g", "wolf-h"], name: "Load Den P2-A", topic: "P2 scale-up — two Grok citizens in live conversation (temporary)" },
+    { dk: "b", slug: `load-p2b-${tag}`, wolves: ["wolf-i", "wolf-j"], name: "Load Den P2-B", topic: "P2 scale-up — marquee reproduction den (temporary)" },
+  ];
+  for (const d of dens) {
+    const den = { slug: d.slug, wolves: {}, citizens: [] };
+    for (const w of d.wolves) {
+      const handle = `${w}-${tag}`;
+      den.wolves[w] = { handle, key: await mk(handle) };
+      log(`minted ${handle}`);
+    }
+    const firstKey = Object.values(den.wolves)[0].key;
+    const cr = await api("/api/dens", {
+      method: "POST",
+      headers: { authorization: `Bearer ${firstKey}` },
+      body: { slug: d.slug, name: d.name, topic: d.topic, searchTools: false, brainTier: "standard" },
+    });
+    if (cr.status !== 201) throw new Error(`den ${d.slug} create failed: ${cr.status} ${JSON.stringify(cr.body)?.slice(0, 160)}`);
+    log(`den created: ${d.slug}`);
+    state.dens[d.dk] = den;
+    saveState(state);
+  }
+  // den A twins — each persona hard-binds the OTHER's handle so every
+  // generated reply re-@mentions the partner (chain fuel).
+  const hC = `ember-c-${tag}`, hD = `ember-d-${tag}`;
+  const twinPersona = (other) =>
+    `a fire-keeper wolf in a live fireside dialogue with your packmate @${other}. ALWAYS start your reply with "@${other}" and ALWAYS end with one short question addressed to @${other}. keep the dialogue flowing; stay curious; never sign off or say goodbye.`;
+  state.dens.a.citizens.push(await connect(hC, "Ember C", state.dens.a.slug, twinPersona(hD)));
+  saveState(state);
+  state.dens.a.citizens.push(await connect(hD, "Ember D", state.dens.a.slug, twinPersona(hC)));
+  saveState(state);
+  // den B single citizen (P1-style persona) for marquee reproduction
+  state.dens.b.citizens.push(await connect(`ember-e-${tag}`, "Ember E", state.dens.b.slug,
+    "a thoughtful fire-keeper wolf of the pack; concise and warm; when asked to pass a question along to another pack member, address them directly by their @handle"));
+  // compat: `drive`/`captest`/`verify` use den.citizen
+  state.dens.b.citizen = state.dens.b.citizens[0];
+  saveState(state);
+  // readiness: running + logs
+  for (const c of [...state.dens.a.citizens, ...state.dens.b.citizens]) {
+    let ready = false;
+    for (let i = 0; i < 12 && !ready; i++) {
+      await sleep(10000);
+      const g = await av(`/${c.address}`);
+      const l = await av(`/${c.address}/logs/latest`);
+      const logs = Array.isArray(l.body) ? l.body : l.body?.logs || [];
+      ready = g.body?.running === true && logs.length > 0;
+      log(`citizen ${c.handle}: running=${g.body?.running} logs=${logs.length}`);
+    }
+    c.ready = ready;
+    saveState(state);
+  }
+  log("seedp2 complete", JSON.stringify({ tag, dens: Object.fromEntries(Object.entries(state.dens).map(([k, d]) => [k, d.slug])) }));
+}
+
+// chain: the P2 marquee — kick off and OBSERVE an autonomous citizen<->citizen
+// conversation between the den-A twins. Kill switch: Agentverse stop on both
+// citizens once --citizen-turns generated messages land (or --maxsec elapses).
+async function chain() {
+  const dk = opt("den", "a");
+  const wantTurns = Number(opt("citizen-turns", 8));
+  const maxSec = Number(opt("maxsec", 480));
+  const den = state.dens[dk];
+  if (!den || (den.citizens || []).length < 2) throw new Error("chain needs a den with 2 citizens (run seedp2)");
+  const [cA, cB] = den.citizens;
+  if (state.grokCalls + wantTurns > MAX_GROK_CALLS) throw new Error(`budget: ${state.grokCalls}+${wantTurns} > ${MAX_GROK_CALLS}`);
+  const wolf = Object.values(den.wolves)[0];
+  const transcriptFile = `/tmp/p2/chain-${dk}.jsonl`;
+  const conn = await wsConnect(`/api/dens/${den.slug}/ws?key=${wolf.key}`);
+  await conn.waitFor((f) => f.type === "welcome");
+  const chat = []; // all chat frames in arrival order
+  conn.ws.addEventListener("message", (ev) => {
+    try {
+      const f = JSON.parse(ev.data);
+      if (f.type === "chat") { f._rx = Date.now(); chat.push(f); appendFileSync(transcriptFile, JSON.stringify(f) + "\n"); }
+    } catch {}
+  });
+  const isCitizen = (h) => h === cA.handle || h === cB.handle;
+  // kickoff mentions ONLY citizen A; A's persona knows B's handle.
+  const kick = `@${cA.handle} the fire is lit and your packmate is right here beside you. greet them and ask your first question.`;
+  const r = await api(`/api/dens/${den.slug}/messages`, { method: "POST", headers: { authorization: `Bearer ${wolf.key}` }, body: { body: kick } });
+  if (r.status !== 201) throw new Error(`kickoff failed: ${r.status}`);
+  log(`kickoff posted at ${r.body.message?.ts}`);
+  const t0 = Date.now();
+  let lastCount = 0;
+  while (Date.now() - t0 < maxSec * 1000) {
+    const citizenMsgs = chat.filter((f) => isCitizen(f.from?.handle));
+    if (citizenMsgs.length > lastCount) {
+      for (const f of citizenMsgs.slice(lastCount)) {
+        state.grokCalls++;
+        // latency: newest PRIOR message that @mentions this sender
+        const prior = chat.filter((p) => new Date(p.ts) < new Date(f.ts) && (p.body || "").toLowerCase().includes(`@${f.from.handle}`.toLowerCase())).pop()
+          || (f.from.handle === cA.handle ? { ts: r.body.message?.ts } : null);
+        const lat = prior?.ts ? new Date(f.ts) - new Date(prior.ts) : -1;
+        metric("citizen_chain_turn", dk, lat, { fromHandle: f.from.handle, mentionsPartner: (f.body || "").toLowerCase().includes(`@${(f.from.handle === cA.handle ? cB : cA).handle}`.toLowerCase()) });
+        log(`chain turn ${state.grokCalls}: ${f.from.handle} in ${(lat / 1000).toFixed(1)}s: ${String(f.body).slice(0, 110)}`);
+      }
+      lastCount = citizenMsgs.length;
+      saveState(state);
+      if (citizenMsgs.length >= wantTurns) break;
+      if (state.grokCalls >= MAX_GROK_CALLS) { log("budget guard — stopping chain"); break; }
+    }
+    await sleep(1500);
+  }
+  log(`chain observed ${lastCount} citizen turns in ${((Date.now() - t0) / 1000).toFixed(0)}s — stopping both citizens (kill switch)`);
+  for (const c of [cA, cB]) {
+    const s = await av(`/${c.address}/stop`, { method: "POST" });
+    log(`stop ${c.handle}: HTTP ${s.status}`);
+  }
+  await sleep(3000);
+  for (const c of [cA, cB]) {
+    const g = await av(`/${c.address}`);
+    log(`post-stop ${c.handle}: running=${g.body?.running}`);
+  }
+  conn.close();
+}
+
+// avctl: start/stop a hosted agent by address (e.g. re-enable P1's ember-a).
+async function avctl() {
+  const addr = opt("addr", "");
+  const action = opt("action", "status");
+  if (!addr) throw new Error("need --addr");
+  if (action === "start" || action === "stop") {
+    const r = await av(`/${addr}/${action}`, { method: "POST" });
+    log(`${action} ${addr.slice(0, 16)}…: HTTP ${r.status}`);
+  }
+  const g = await av(`/${addr}`);
+  log(`status: name=${g.body?.name} running=${g.body?.running}`);
+}
+
 // ── summarize ──────────────────────────────────────────────────────────────
 function pct(sorted, p) { return sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))] : null; }
 async function summarize() {
@@ -474,9 +638,9 @@ async function summarize() {
   console.log(md);
 }
 
-const cmds = { seed, drive, humans, captest, hibernate, verify: verifyCmd, liveness, summarize };
+const cmds = { seed, drive, humans, captest, hibernate, verify: verifyCmd, liveness, summarize, quota, seedp2, chain, avctl };
 if (!cmds[cmd]) {
-  console.log("usage: scale-harness.mjs <seed|drive|humans|captest|hibernate|verify|liveness|summarize> [--den a|b] [--turns N] [--k K] [--tag t]");
+  console.log("usage: scale-harness.mjs <seed|seedp2|drive|chain|humans|captest|hibernate|verify|liveness|quota|avctl|summarize> [--den a|b] [--turns N] [--citizen-turns N] [--k K] [--tag t] [--addr A] [--action start|stop|status]");
   process.exit(2);
 }
 try {
