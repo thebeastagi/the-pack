@@ -520,6 +520,30 @@ test("cloudflare provider + EMAIL_STUB_FALLBACK=1 (preview): binding-absent AND 
   }
 });
 
+test("dev-mail endpoint tracks the stub sink: readable with fallback armed, cloaked for a healthy real binding", async () => {
+  const sv = stubSiteverify();
+  try {
+    // fallback armed (binding absent): E2E must be able to read its codes
+    let env = makeEnv({ ...CF_BASE, EMAIL_STUB_FALLBACK: "1" });
+    await worker.fetch(startReq("sink@example.net"), env);
+    let res = await worker.fetch(
+      req("/api/admin/dev-mail?email=sink@example.net", { headers: { "x-admin-token": "test-admin-token" } }),
+      env,
+    );
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).mail.length, 1);
+    // healthy real binding, no fallback: endpoint does not exist
+    env = makeEnv({ ...CF_BASE, EMAIL: fakeEmailBinding("ok") });
+    res = await worker.fetch(
+      req("/api/admin/dev-mail?email=sink@example.net", { headers: { "x-admin-token": "test-admin-token" } }),
+      env,
+    );
+    assert.equal(res.status, 404);
+  } finally {
+    sv.restore();
+  }
+});
+
 test("DEV MAIL banner mirrors the sender truth (shown for stub-ish, absent for real binding)", async () => {
   // stub-ish (fallback armed, binding absent) → banner
   let env = makeEnv({ ...CF_BASE, EMAIL_STUB_FALLBACK: "1" });

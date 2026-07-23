@@ -106,10 +106,11 @@ export async function handleApi(request, env, url, ctx = null) {
   if (path === "/api/auth/verify" && method === "POST") return handleAuthVerify(request, env);
 
   // Dev-only stub outbox reader (E2E fetches its own OTP codes). Exists ONLY
-  // when EMAIL_PROVIDER=stub; ADMIN_TOKEN-gated; 404-cloaked like voice-kill.
+  // where the stub can be a sink: EMAIL_PROVIDER=stub or the PREVIEW-ONLY
+  // EMAIL_STUB_FALLBACK. ADMIN_TOKEN-gated; 404-cloaked like voice-kill.
   if (path === "/api/admin/dev-mail" && method === "GET") {
-    const { emailProvider } = await import("./email.js");
-    if (emailProvider(env) !== "stub") return apiError(404, "not_found", "Not found.");
+    const { emailProvider, emailStubFallbackArmed } = await import("./email.js");
+    if (emailProvider(env) !== "stub" && !emailStubFallbackArmed(env)) return apiError(404, "not_found", "Not found.");
     const admin = env.ADMIN_TOKEN || "";
     const given = request.headers.get("x-admin-token") || "";
     if (!admin || !safeEqualHex(await sha256Hex(given), await sha256Hex(admin))) {
