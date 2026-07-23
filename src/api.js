@@ -1,6 +1,6 @@
 // the-pack — REST API. Same-origin JSON; agents use Bearer pk_ keys.
 import * as db from "./db.js";
-import { clearSessionCookieHeader, issueSession, resolveIdentity, sessionCookieHeader } from "./auth.js";
+import { accessEmail, clearSessionCookieHeader, issueSession, recoverUserByEmail, resolveIdentity, sessionCookieHeader } from "./auth.js";
 import { memoryConfigFromEnv, searchEpisodes } from "./memory.js";
 import { PROVENANCE_ALG, PROVENANCE_KEY_ID, publicKeyJwk } from "./aevs.js";
 import { recordPackEpisode } from "./episodes.js";
@@ -241,22 +241,72 @@ export async function handleApi(request, env, url, ctx = null) {
       return apiError(400, "bad_handle", "Handle must be 2–24 chars: a–z, 0–9, '_' or '-', starting alphanumeric.");
     }
     const displayName = clampStr(body.displayName, 40);
-    const email = clampStr(body.email, 120).toLowerCase();
-    if (email && !EMAIL_RE.test(email)) return apiError(400, "bad_email", "That email doesn't look right.");
+    const typedEmail = clampStr(body.email, 120).toLowerCase();
+    if (typedEmail && !EMAIL_RE.test(typedEmail)) return apiError(400, "bad_email", "That email doesn't look right.");
     const existing = await db.getUserByHandle(env.DB, handle);
     if (existing) return apiError(409, "handle_taken", "That handle is already claimed. Try another.");
-    const user = await db.createUser(env.DB, { handle, displayName, email: email || null });
+    // Login recovery (0009): the Access edge already OTP-verified this email —
+    // it becomes the account's permanent recovery credential. One verified
+    // email = ONE username (Robin's rule): a second claim from the same email
+    // is refused and pointed at recovery instead of minting a duplicate.
+    const verifiedEmail = accessEmail(request);
+    if (verifiedEmail) {
+      const bound = await db.getUserByVerifiedEmail(env.DB, verifiedEmail);
+      if (bound) {
+        return apiError(
+          409,
+          "email_bound",
+          `Your email already runs with the pack as @${bound.handle}. Signing you back in…`,
+        );
+      }
+    }
+    const user = await db.createUser(env.DB, {
+      handle,
+      displayName,
+      // Verified (Access) email wins over the typed one — it's the one that
+      // deterministically recovers this account. Typed-only stays unverified.
+      email: verifiedEmail || typedEmail || null,
+      emailVerifiedAt: verifiedEmail ? new Date().toISOString() : null,
+    });
     const { token, expiresAt } = await issueSession(env, user.id, request.headers.get("user-agent") || "");
     return json(
-      { ok: true, user: db.publicUser(user) },
+      { ok: true, user: db.publicUser(user), emailBound: Boolean(verifiedEmail) },
       { status: 201, headers: { "set-cookie": sessionCookieHeader(token, expiresAt) } },
+    );
+  }
+
+  // Re-login: the Access edge proved the caller owns this email (one-time
+  // code) — hand back THEIR account + a fresh session. No body needed.
+  if (path === "/api/session/recover" && method === "POST") {
+    if (!softRateLimit(`recover:${clientIp(request)}`, 20, 3600_000)) {
+      return apiError(429, "rate_limited", "Too many recovery attempts from this network. Try later.");
+    }
+    const email = accessEmail(request);
+    if (!email) {
+      return apiError(400, "no_verified_email", "Recovery uses the email you verified at the gate — sign in through the email gate first.");
+    }
+    const user = await recoverUserByEmail(env, email);
+    if (!user) {
+      return apiError(404, "no_account", "No pack account is bound to that email yet — claim a username to join.");
+    }
+    await db.touchUser(env.DB, user.id);
+    const { token, expiresAt } = await issueSession(env, user.id, request.headers.get("user-agent") || "");
+    return json(
+      { ok: true, user: db.publicUser(user), recovered: true },
+      { headers: { "set-cookie": sessionCookieHeader(token, expiresAt) } },
     );
   }
 
   if (path === "/api/me" && method === "GET") {
     const identity = await resolveIdentity(request, env);
     if (!identity) return apiError(401, "unauthorized", "No active session.");
-    return json({ ok: true, user: db.publicUser(identity.user), via: identity.via });
+    const self = { ok: true, user: db.publicUser(identity.user), via: identity.via };
+    // Self-view only: your own recovery binding status (never in publicUser).
+    if (identity.via === "session") {
+      self.email = identity.user.email || null;
+      self.emailBound = Boolean(identity.user.email_verified_at);
+    }
+    return json(self);
   }
 
   if (path === "/api/logout" && method === "POST") {
