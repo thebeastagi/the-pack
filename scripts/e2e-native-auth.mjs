@@ -123,8 +123,11 @@ let cookie2 = null;
 }
 {
   const { res } = await call("/", { headers: { "cf-access-authenticated-user-email": EMAIL } });
-  const setCookie = res.headers.get("set-cookie");
-  step("spoof: page GET with forged header → no silent-resume cookie", res.status === 200 && !setCookie);
+  // NB: an Access edge in front sets its own CF_Authorization cookie on HTML
+  // responses — the assertion is specifically that the WORKER minted no
+  // pack_session (silent resume must be dead in native mode).
+  const setCookie = res.headers.get("set-cookie") || "";
+  step("spoof: page GET with forged header → no silent-resume pack_session cookie", res.status === 200 && !setCookie.includes("pack_session="));
 }
 
 console.log(`\nALL ${results.length} STEPS PASS`);
