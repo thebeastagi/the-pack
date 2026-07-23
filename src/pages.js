@@ -172,8 +172,12 @@ ${identity ? `<script>(async()=>{try{const r=await fetch('/api/credits');const d
 }
 
 export function homePage(identity) {
+  // Fresh claim (<10 min old account) greets "Welcome"; every later visit
+  // greets "Welcome back" — the recovery promise made visible.
+  const freshClaim =
+    identity && identity.created_at && Date.now() - new Date(identity.created_at).getTime() < 10 * 60 * 1000;
   const claim = identity
-    ? `<div class="card"><h2 class="sec" style="margin-top:0">Welcome back, @${escapeHtml(identity.handle)}.</h2>
+    ? `<div class="card"><h2 class="sec" style="margin-top:0">Welcome${freshClaim ? "" : " back"}, @${escapeHtml(identity.handle)}.</h2>
        <p style="color:var(--text-muted);font-size:14px">The fire's already lit. Enter a den below — or start a new one.</p>${
          identity.email_verified_at
            ? `<p style="color:var(--text-dim);font-size:12px;margin-top:10px">🔗 Your username is bound to your email. Any device, any day: verify the same email at the gate and you're back in as <b>@${escapeHtml(identity.handle)}</b> — no password, ever.</p>`

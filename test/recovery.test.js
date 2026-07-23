@@ -132,6 +132,8 @@ test("legacy grandfather: pre-cutoff self-asserted email recovers + promotes; po
 test("silent page resume: home GET with Access email + no cookie signs the user back in", async () => {
   const env = makeEnv();
   await worker.fetch(claimReq("page-wolf", { accessEmail: "page@wolf.net" }), env);
+  // Age the account past the fresh-claim window so the greeting flips to "back".
+  env.DB._tables.users.find((u) => u.handle === "page-wolf").created_at = "2026-07-23T01:00:00.000Z";
   const res = await worker.fetch(
     req("/", { headers: { "cf-access-authenticated-user-email": "page@wolf.net", "cf-connecting-ip": nextIp() } }),
     env,
