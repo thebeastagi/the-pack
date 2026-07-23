@@ -18,7 +18,24 @@ routes = [
 ]
 
 [vars]
-PACK_VERSION = "0.8.0"           # 0.8.0 (2026-07-23): login recovery — email-to-username permanent binding (migration 0009)
+PACK_VERSION = "0.9.4"           # 0.9.4 (2026-07-23): PROD native auth cutover — AUTH_MODE=native + CF Email Sending OTP + real Turnstile (migration 0010)
+# ── native auth (M3 PROD cutover, 2026-07-23) ──────────────────────────────
+# AUTH_MODE: "access" (legacy CF Access edge harvest) | "native" (worker-owned
+# email OTP; cf-access-* headers UNCONDITIONALLY ignored). Rollback = set back
+# to "access" + wrangler deploy (<5min, sessions survive).
+AUTH_MODE = "native"
+# OTP sender = Cloudflare Email Sending (account feature ENABLED by Robin
+# 2026-07-23; domain thebeastagi.com onboarded, delivery verified). The
+# [[send_email]] binding below + EMAIL_FROM — no API keys, no secrets.
+# ⚠️ EMAIL_STUB_FALLBACK is FORBIDDEN on prod: absent ⇒ sender fail-closes
+# (503 on /api/auth/start) instead of silently eating OTP codes.
+EMAIL_PROVIDER = "cloudflare"
+EMAIL_FROM = "no-reply@thebeastagi.com"
+EMAIL_FROM_NAME = "The Pack"
+# REAL Turnstile widget (public site key — safe as a var; the widget SECRET is
+# `wrangler secret put TURNSTILE_SECRET_KEY`, never committed). Widget
+# hostnames include pack.thebeastagi.com. Pre-clearance: OFF.
+TURNSTILE_SITE_KEY = "0x4AAAAAAD8AScKP949aLmFi"
 # Access gate stays ON post-launch (2026-07-21 public flip): the main app policy
 # is now "everyone" — any email via one-time code. Verified email = signup + abuse
 # guard. Full lift (no gate at all) = "0" + redeploy + remove/disable the main app.
@@ -82,6 +99,11 @@ new_sqlite_classes = ["DenRoom"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["VoiceDen"]
+
+# Cloudflare Email Sending binding (OTP mail). Requires the sending domain to
+# be onboarded in the Email Sending product (done 2026-07-23).
+[[send_email]]
+name = "EMAIL"
 
 [[d1_databases]]
 binding = "DB"
