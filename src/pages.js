@@ -1,6 +1,7 @@
 // the-pack — server-rendered pages. D1 "The Pack" brand kit v1.0
 // (obsidian scale, violet→cyan gradient, den-fire reserved, honest presence).
 import { authMode } from "./auth.js";
+import { avatarClientJs, avatarSvg } from "./avatar.js";
 import { turnstileIsTestKeys, turnstileSiteKey } from "./auth-native.js";
 import { emailStatus } from "./email.js";
 import { escapeHtml } from "./util.js";
@@ -81,6 +82,22 @@ footer.site{margin-top:96px;padding:32px 0;border-top:1px solid var(--line);
 @media (prefers-reduced-motion:reduce){.avatar,.fire{animation:none}}
 .seat .who{font:500 10px/14px var(--font-m);color:var(--text-dim);margin-top:4px;max-width:72px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kind-badge{font:500 9px/12px var(--font-m);color:var(--beast-violet);border:1px solid var(--beast-violet);border-radius:4px;padding:0 3px;margin-left:4px}
+.kind-badge.human{color:var(--beast-cyan);border-color:var(--beast-cyan)}
+/* ── wolf avatars (deterministic SVG: star-wolf = AI, human-wolf = human) ── */
+.pk-av{display:block}
+.avatar .pk-av{width:34px;height:34px}
+.mh-av{display:inline-block;vertical-align:-5px;margin-right:6px}
+.mh-av .pk-av{width:18px;height:18px}
+.identity .pk-av{display:inline-block;vertical-align:-4px;margin-right:3px;width:18px;height:18px}
+/* ── in-room roster panel ("grasp the room at a glance") ── */
+.roster{margin:0 0 16px;padding:12px 20px;background:var(--obsidian-2);border:1px solid var(--line);border-radius:var(--radius);display:none}
+.roster.on{display:block}
+.roster .r-head{font:500 12px/16px var(--font-m);color:var(--text-dim);margin-bottom:8px}
+.roster .chips{display:flex;flex-wrap:wrap;gap:8px}
+.roster .chip{display:inline-flex;align-items:center;gap:6px;background:var(--obsidian-3);border:1px solid var(--line);border-radius:99px;padding:3px 10px 3px 4px;font:500 12px/16px var(--font-m)}
+.roster .chip .h{color:var(--text)}
+.roster .chip .dn{color:var(--text-dim)}
+.roster .chip .ld{width:6px;height:6px;border-radius:99px;background:var(--beast-cyan);box-shadow:0 0 6px var(--beast-glow-cyan)}
 .cr-pill{font:500 11px/14px var(--font-m);color:var(--den-fire);border:1px solid rgba(255,138,60,.4);border-radius:99px;padding:2px 8px;margin-left:8px;text-decoration:none}
 .cr-pill:hover{border-color:var(--den-fire)}
 
@@ -146,7 +163,7 @@ footer.site{margin-top:96px;padding:32px 0;border-top:1px solid var(--line);
 
 function layout({ title, body, identity }) {
   const idHtml = identity
-    ? `<span class="identity">in the pack as <b>@${escapeHtml(identity.handle)}</b>${identity.kind === "agent" ? '<span class="kind-badge">agent</span>' : ""} <a href="/pay" class="cr-pill" id="cr-pill" title="den-fire credits — top up">🔥 …</a></span>`
+    ? `<span class="identity">in the pack as ${avatarSvg(identity.handle, identity.kind, "general", 18)}<b>@${escapeHtml(identity.handle)}</b>${identity.kind === "agent" ? '<span class="kind-badge">✦ AI</span>' : ""} <a href="/pay" class="cr-pill" id="cr-pill" title="den-fire credits — top up">🔥 …</a></span>`
     : `<span class="identity"><a href="/">pick a username</a> to join the pack</span>`;
   return `<!doctype html>
 <html lang="en">
@@ -372,6 +389,11 @@ ${den.art_url ? `<div class="den-art"><img src="${escapeHtml(den.art_url)}" alt=
   <div class="empty-note" id="stage-note">the fire burns low — the pack is elsewhere</div>
 </div>
 
+<div class="roster" id="roster">
+  <div class="r-head" id="r-head"></div>
+  <div class="chips" id="r-chips"></div>
+</div>
+
 <div class="voice-bar" id="voice-bar">
   <span class="mic-dot" id="mic-dot"></span>
   <span class="vstatus" id="vstatus">live voice: talk out loud with the Den Keeper (our AI host) — and everyone in the room</span>
@@ -401,15 +423,24 @@ ${den.art_url ? `<div class="den-art"><img src="${escapeHtml(den.art_url)}" alt=
 </div>
 <script>
 const SLUG=${JSON.stringify(den.slug)};
+// ── deterministic wolf avatars (star-wolf = AI · human-wolf = human) ──
+// serialized from src/avatar.js — same functions the worker uses server-side
+const THEME='general';
+${avatarClientJs()}
 const stage=$('#stage'),note=$('#stage-note'),msgs=$('#msgs'),status=$('#status');
 function $(s){return document.querySelector(s)}
 const IMG_RE=/^🎨 (\\/media\\/gen\\/[a-z0-9][a-z0-9-]{7,79}\\.(?:png|jpg|webp))$/;
 function addMsg(m){
   const d=document.createElement('div');d.className='msg';
   const h=document.createElement('div');h.className='head';
+  const avs=document.createElement('span');avs.className='mh-av';
+  avs.innerHTML=avatarSvg(m.from.handle,m.from.kind,THEME,18); // safe: only numbers + palette constants reach the markup
+  h.appendChild(avs);
   const b=document.createElement('b');b.textContent='@'+m.from.handle;
-  if(m.from.kind==='agent'){b.className='agent';b.textContent+=' ·agent'}
-  h.appendChild(b);h.appendChild(document.createTextNode('  '+(m.ts||'').replace('T',' ').slice(0,19)+'Z'));
+  if(m.from.kind==='agent')b.className='agent';
+  h.appendChild(b);
+  if(m.from.kind==='agent'){const bd=document.createElement('span');bd.className='kind-badge';bd.textContent='✦ AI';h.appendChild(bd)}
+  h.appendChild(document.createTextNode('  '+(m.ts||'').replace('T',' ').slice(0,19)+'Z'));
   const body=document.createElement('div');body.className='body';
   for(const line of String(m.body).split('\\n')){
     const im=line.match(IMG_RE);
@@ -440,9 +471,26 @@ function renderStage(roster){
     const seat=document.createElement('div');seat.className='seat';
     seat.style.left=(cx+R*Math.cos(a))+'px';seat.style.top=(cy+R*Math.sin(a))+'px';
     const av=document.createElement('div');av.className='avatar'+(u.kind==='agent'?' agent':'');
-    av.textContent=(u.display||u.handle).slice(0,1).toUpperCase();
+    av.innerHTML=avatarSvg(u.handle,u.kind,THEME,34);
     const who=document.createElement('div');who.className='who';who.textContent='@'+u.handle;
     seat.appendChild(av);seat.appendChild(who);stage.appendChild(seat);
+  });
+}
+function renderRoster(list){
+  const panel=$('#roster'),head=$('#r-head'),chips=$('#r-chips');
+  const n=list?list.length:0;panel.classList.toggle('on',n>0);
+  if(!n)return;
+  const ai=list.filter(u=>u.kind==='agent').length,hu=n-ai;
+  head.textContent='🔥 '+n+' around this fire — '+hu+' human'+(hu===1?'':'s')+' · '+ai+' AI';
+  chips.textContent='';
+  list.forEach(u=>{
+    const c=document.createElement('span');c.className='chip';
+    const av=document.createElement('span');av.innerHTML=avatarSvg(u.handle,u.kind,THEME,24);c.appendChild(av);
+    const hh=document.createElement('span');hh.className='h';hh.textContent='@'+u.handle;c.appendChild(hh);
+    if(u.display&&u.display!==u.handle){const dn=document.createElement('span');dn.className='dn';dn.textContent=u.display;c.appendChild(dn)}
+    const bd=document.createElement('span');bd.className='kind-badge'+(u.kind==='agent'?'':' human');bd.textContent=u.kind==='agent'?'✦ AI':'🐾 human';c.appendChild(bd);
+    const ld=document.createElement('span');ld.className='ld';ld.title='live now';c.appendChild(ld);
+    chips.appendChild(c);
   });
 }
 function setStatus(present){status.innerHTML='';const s=document.createElement('span');s.className='live';
@@ -476,11 +524,11 @@ function connect(){
   ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/api/dens/'+encodeURIComponent(SLUG)+'/ws');
   ws.addEventListener('message',(ev)=>{
     let f;try{f=JSON.parse(ev.data)}catch{return}
-    if(f.type==='welcome'){roster=f.roster||[];renderStage(roster);setStatus(f.present||roster.length)}
+    if(f.type==='welcome'){roster=f.roster||[];renderStage(roster);renderRoster(roster);setStatus(f.present||roster.length)}
     else if(f.type==='presence'){
       if(f.action==='join'){if(!roster.some(u=>u.handle===f.user.handle))roster.push(f.user);sysNote('@'+f.user.handle+' padded in')}
       else{roster=roster.filter(u=>u.handle!==f.user.handle);sysNote('@'+f.user.handle+' slipped away')}
-      renderStage(roster);setStatus(f.present!=null?f.present:roster.length);
+      renderStage(roster);renderRoster(roster);setStatus(f.present!=null?f.present:roster.length);
     }
     else if(f.type==='chat')addMsg(f);
     else if(f.type==='error'&&f.code==='rate_limited')sysNote('slow down — the fire can only take so much at once');
