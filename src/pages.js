@@ -97,6 +97,33 @@ footer.site{margin-top:96px;padding:32px 0;border-top:1px solid var(--line);
 .burn-table td,.burn-table th{padding:8px 10px;border-bottom:1px solid var(--line-2);text-align:left}
 .burn-table th{font:500 11px/14px var(--font-m);color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em}
 .burn-table td.num{font:500 13px/18px var(--font-m);color:var(--den-fire);white-space:nowrap}
+/* ── /pay/checkout confirm + /pay/thanks return (payment-ux) ── */
+.co-card{max-width:560px;margin:24px auto 0;background:var(--obsidian-2);border:1px solid var(--line);border-radius:var(--radius);padding:28px;position:relative;overflow:hidden}
+.co-card::before{content:"";position:absolute;top:0;left:40px;right:40px;height:2px;background:linear-gradient(120deg,var(--den-fire) 0%,var(--den-fire-deep) 100%);opacity:.8;border-radius:2px}
+.co-card h2{font:600 24px/30px var(--font-d);color:var(--den-fire);margin:0 0 4px;text-align:center}
+.co-price{font:700 34px/40px var(--font-d);text-align:center;margin:10px 0 2px}
+.co-price small{font:500 14px/20px var(--font-m);color:var(--text-muted)}
+.co-gets{list-style:none;margin:16px 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.co-gets li{font-size:14px;color:var(--text-muted);padding-left:24px;position:relative}
+.co-gets li::before{content:"🔥";position:absolute;left:0;font-size:12px}
+.co-steps{margin:18px 0;padding:14px 16px;background:var(--obsidian-1);border:1px solid var(--line-2);border-radius:10px;display:flex;flex-direction:column;gap:10px}
+.co-steps .st{display:flex;gap:10px;font-size:13px;line-height:19px;color:var(--text-muted)}
+.co-steps .st b{flex:0 0 20px;height:20px;border-radius:99px;background:var(--obsidian-4);color:var(--den-fire);font:600 11px/20px var(--font-m);text-align:center}
+.co-steps .st .dim{color:var(--text-dim)}
+.co-note{font:400 12px/17px var(--font-b);color:var(--text-dim);margin-top:12px;text-align:center}
+.co-cancel{display:block;text-align:center;margin-top:14px;font:500 13px/18px var(--font-m)}
+.btn.big{width:100%;padding:13px 18px;font-size:15px}
+.co-overlay{position:fixed;inset:0;background:rgba(6,6,11,.92);display:none;place-items:center;z-index:60}
+.co-overlay.on{display:grid}
+.co-overlay .box{max-width:420px;margin:0 20px;text-align:center;background:var(--obsidian-2);border:1px solid var(--line);border-radius:var(--radius);padding:32px 28px}
+.co-overlay .flame{font-size:40px;animation:flicker-a 1.6s ease-in-out infinite}
+.co-overlay h3{font:600 19px/25px var(--font-d);margin:12px 0 6px}
+.co-overlay p{font-size:13px;color:var(--text-muted);margin:0}
+.thx-cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:18px}
+.thx-cta .btn{min-width:180px;text-align:center}
+.thx-cta .btn.ghost{background:none;border:1px solid var(--line);color:var(--text-muted)}
+.thx-delta{font:700 40px/46px var(--font-d);color:var(--den-fire);text-align:center;margin:6px 0}
+.thx-bal{font:500 15px/22px var(--font-m);color:var(--text-muted);text-align:center}
 
 /* ── den artwork (Runway-generated, D1-stored) ── */
 .den-art{position:relative;height:180px;border-radius:var(--radius);overflow:hidden;margin:24px 0 0;border:1px solid var(--line)}
@@ -652,15 +679,30 @@ const PAY_PACKS = [
   { sku: "inferno", label: "Inferno", usd: 50, credits: 7000, bonus: "+40% bonus" },
 ];
 
-export function payPage(identity, env) {
+// Loose "what it gets you" hints for normies (burn floors: search 5cr, image 4cr).
+const PAY_GETS = [
+  "about " + Math.floor(500 / 5) + " live-web searches",
+  "about " + Math.floor(500 / 4) + " /imagine paintings",
+];
+
+// Return-context sanitizer: internal absolute paths only (open-redirect guard).
+// Allows /den/<slug> and the few real pages — anything exotic degrades to null.
+export function sanitizeFromPath(from) {
+  if (typeof from !== "string") return null;
+  if (!/^\/[a-z0-9][a-z0-9/-]{0,79}$/i.test(from) || from.startsWith("//")) return null;
+  return from;
+}
+
+export function payPage(identity, env, from = null) {
   const configured = Boolean(env?.ALLSCALE_API_KEY && env?.ALLSCALE_API_SECRET);
+  const fromQ = from ? `&from=${encodeURIComponent(from)}` : "";
   const cards = PAY_PACKS.map(
     (p) => `<div class="pack-card">
       <h3>${p.label}</h3>
       <div class="cr">${p.credits.toLocaleString("en-US")} cr</div>
       <div class="usd">$${p.usd}.00 · $${(p.usd / p.credits).toFixed(4)}/cr</div>
       ${p.bonus ? `<span class="bonus">${p.bonus}</span>` : `<span class="bonus" style="visibility:hidden">—</span>`}
-      <button class="btn fire" data-pack="${p.sku}" ${identity && configured ? "" : "disabled"}>Feed the fire — $${p.usd}</button>
+      ${identity && configured ? `<a class="btn fire" href="/pay/checkout?pack=${p.sku}${fromQ}">Feed the fire — $${p.usd}</a>` : `<button class="btn fire" disabled>Feed the fire — $${p.usd}</button>`}
     </div>`,
   ).join("");
 
@@ -677,8 +719,8 @@ export function payPage(identity, env) {
   <p class="phase">1 credit = $0.01 · prepaid · non-transferable · no cash-out</p>
 </section>
 ${gate}
+${from ? `<p class="phase" style="text-align:center"><a href="${escapeHtml(from)}">← back to your den</a></p>` : ""}
 <div class="pack-grid">${cards}</div>
-<div class="error" id="pay-err" style="text-align:center"></div>
 
 <h2 class="sec">What credits buy</h2>
 <div class="card">
@@ -694,25 +736,12 @@ ${gate}
 
 <h2 class="sec">How paying works</h2>
 <div class="card">
-  <p style="color:var(--text-muted);font-size:14px">Checkout is hosted by <b>AllScale</b> — pay in <b>USDC or USDT</b> from any wallet (the proven path on our rails). Card &amp; local payments via AllScale's on-ramp (USDC, about $5+) appear on the checkout page where supported; card settlement is new on our rails, so if a card payment ever fails to confirm, your order simply stays unsettled and no credits move.</p>
+  <p style="color:var(--text-muted);font-size:14px">You check out on a secure page hosted by our payment partner <b>AllScale</b> — it looks different from The Pack (white, "FROM The Beast", "Powered by AllScale") and that's expected: it's still your order, and <b>you return here automatically</b> when it's done. Pay in <b>USDC or USDT</b> from any wallet — stablecoins pegged 1:1 to the US dollar, so $5.00 = 5.00 USDC. Card &amp; local payments via AllScale's on-ramp (about $5+) appear on the checkout page where supported; card settlement is new on our rails, so if a card payment ever fails to confirm, your order simply stays unsettled and no credits move.</p>
   <p style="color:var(--text-dim);font-size:12px;margin-top:10px">Credits are prepaid consumption units for The Pack only: non-refundable, non-transferable, no cash-out. 18+ (or with a guardian's consent). Your balance and full ledger are always visible on this page.</p>
 </div>
 
 <div id="my-credits"></div>
 <script>
-const ERR=document.getElementById('pay-err');
-document.querySelectorAll('.pack-card .btn.fire').forEach(function(b){
-  b.addEventListener('click',async function(){
-    ERR.textContent='';b.disabled=true;b.textContent='opening checkout…';
-    try{
-      const r=await fetch('/api/payments/allscale/create-intent',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({pack:b.getAttribute('data-pack')})});
-      const d=await r.json().catch(function(){return {}});
-      if(d.ok&&d.checkout_url){location.href=d.checkout_url;return}
-      ERR.textContent=(d.error&&d.error.message)||'Checkout failed to open — nothing was charged.';
-    }catch{ERR.textContent='Network hiccup — nothing was charged. Try again.'}
-    b.disabled=false;b.textContent=b.textContent.replace('opening checkout…','Feed the fire');
-  });
-});
 (async function(){
   const mount=document.getElementById('my-credits');
   try{
@@ -736,41 +765,157 @@ document.querySelectorAll('.pack-card .btn.fire').forEach(function(b){
   return layout({ title: "Den-fire credits", body, identity });
 }
 
-// ── /pay/thanks — AllScale redirect target ──────────────────────────────────
+// ── /pay/checkout — in-Pack pre-checkout confirm (payment-ux) ──────────────
+// The Pack's own "review your order" step BEFORE the handoff to AllScale's
+// hosted page: what you're buying, what credits do, what happens next (incl.
+// the branding switch + automatic return). Worker guards identity/config/sku.
+export function payCheckoutPage(identity, pack, from = null) {
+  const fromQ = from ? `&from=${encodeURIComponent(from)}` : "";
+  const fromJson = JSON.stringify(from || "");
+  const gets = [
+    `about ${Math.floor(pack.credits / 5)} live-web searches in your dens`,
+    `about ${Math.floor(pack.credits / 4)} /imagine paintings`,
+    "voice minutes + premium brains as they land",
+  ]
+    .map((g) => `<li>${g}</li>`)
+    .join("");
+  const body = `
+<section class="hero" style="padding:40px 0 8px;text-align:center">
+  <h1 style="font-size:34px;line-height:42px">Feed the fire</h1>
+</section>
+<div class="co-card">
+  <h2>${pack.label} pack</h2>
+  <div class="co-price">$${pack.usd}.00 <small>· ${pack.credits.toLocaleString("en-US")} den-fire credits${pack.bonus ? ` (${pack.bonus})` : ""}</small></div>
+  <ul class="co-gets">${gets}</ul>
+  <div class="co-steps">
+    <div class="st"><b>1</b><span>We open <b>secure checkout by our payment partner AllScale</b> — a white page that says "FROM The Beast". Different look, still your order.</span></div>
+    <div class="st"><b>2</b><span>Pay with <b>USDC or USDT</b> from any crypto wallet. <span class="dim">USDC is a digital dollar — 1.00 USDC = $1.00. Card payments appear where supported.</span></span></div>
+    <div class="st"><b>3</b><span><b>You come back here automatically</b> — credits land in your balance, usually within seconds.</span></div>
+  </div>
+  <button class="btn fire big" id="co-go">Continue to secure checkout — $${pack.usd}.00</button>
+  <div class="error" id="co-err" style="text-align:center;margin-top:10px"></div>
+  <p class="co-note">Buying as <b>@${escapeHtml(identity.handle)}</b> · nothing is charged until you pay on the next page · the checkout link expires after ~1 hour</p>
+  <a class="co-cancel" href="/pay${from ? `?from=${encodeURIComponent(from)}` : ""}">← changed my mind</a>
+</div>
+<div class="co-overlay" id="co-overlay"><div class="box">
+  <div class="flame">🔥</div>
+  <h3>Opening AllScale secure checkout…</h3>
+  <p>You're leaving The Pack for a moment — the next page is hosted by our payment partner. You'll return here automatically when you're done.</p>
+</div></div>
+<script>
+(function(){
+  const BTN=document.getElementById('co-go'),ERR=document.getElementById('co-err'),OV=document.getElementById('co-overlay');
+  const FROM=${fromJson};
+  BTN.addEventListener('click',async function(){
+    ERR.textContent='';BTN.disabled=true;BTN.textContent='preparing checkout…';
+    try{
+      const r=await fetch('/api/payments/allscale/create-intent',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({pack:${JSON.stringify(pack.sku)}})});
+      const d=await r.json().catch(function(){return {}});
+      if(d.ok&&d.checkout_url){
+        try{sessionStorage.setItem('pack_pay_ctx',JSON.stringify({order_id:d.order_id,pack:d.pack,credits:d.credits,amount_cents:d.amount_cents,from:FROM,ts:Date.now()}))}catch(e){}
+        OV.classList.add('on');
+        setTimeout(function(){location.href=d.checkout_url},450);
+        return;
+      }
+      ERR.textContent=(d.error&&d.error.message)||'Checkout failed to open — nothing was charged.';
+    }catch{ERR.textContent='Network hiccup — nothing was charged. Try again.'}
+    BTN.disabled=false;BTN.textContent='Continue to secure checkout — $${pack.usd}.00';
+  });
+})();
+</script>`;
+  return layout({ title: `Checkout — ${pack.label} pack`, body, identity });
+}
+
+// ── /pay/thanks — AllScale redirect target (success-only; see payments.js) ──
+// Knows WHICH order to watch via sessionStorage ctx written by /pay/checkout
+// (falls back to the caller's oldest open order). Three honest states:
+// confirming → settled (credits + return-to-den CTA) | long-pending (retry).
 export function payThanksPage(identity) {
   const body = `
-<section class="hero" style="padding:64px 0 32px">
-  <h1>Thank you 🔥</h1>
-  <p class="lead" id="thanks-lead">Your payment is confirming — credits land in your balance the moment it settles (usually seconds, on-chain confirmations can take a minute).</p>
-  <p class="phase"><a href="/pay">← back to credits</a> · <a href="/">to the dens</a></p>
+<section class="hero" style="padding:56px 0 24px;text-align:center">
+  <div id="thx-progress">
+    <h1>Confirming your payment…</h1>
+    <p class="lead" style="margin:0 auto;max-width:520px">Credits land in your balance the moment the payment settles — usually seconds; on-chain confirmation can take a minute.</p>
+  </div>
+  <div id="thx-success" style="display:none">
+    <h1>The fire roars 🔥</h1>
+    <div class="thx-delta" id="thx-delta"></div>
+    <p class="thx-bal" id="thx-bal"></p>
+    <div class="thx-cta">
+      <a class="btn fire" id="thx-den-cta" href="/">Back to your den</a>
+      <a class="btn ghost" href="/pay">Your ledger</a>
+    </div>
+  </div>
+  <div id="thx-retry" style="display:none">
+    <h1>Still confirming</h1>
+    <p class="lead" style="margin:0 auto;max-width:520px">On-chain confirmation is taking longer than usual. If you paid, your order settles automatically — no need to stay on this page.</p>
+    <div class="thx-cta">
+      <button class="btn fire" id="thx-retry-btn">Check again</button>
+      <a class="btn ghost" href="/pay">Back to credits</a>
+    </div>
+  </div>
 </section>
-<div class="card" id="settle-card"><p style="color:var(--text-muted);font-size:14px" id="settle-line">checking your order…</p></div>
+<div class="card" id="settle-card"><p style="color:var(--text-muted);font-size:14px;text-align:center" id="settle-line">checking your order…</p></div>
+<p class="co-note">Secure checkout by AllScale · your payment never touches Pack servers</p>
 <script>
 (async function(){
   const line=document.getElementById('settle-line');
+  const el={progress:document.getElementById('thx-progress'),success:document.getElementById('thx-success'),retry:document.getElementById('thx-retry'),
+    delta:document.getElementById('thx-delta'),bal:document.getElementById('thx-bal'),denCta:document.getElementById('thx-den-cta')};
+  function show(s){el.progress.style.display=s==='progress'?'':'none';el.success.style.display=s==='success'?'':'none';el.retry.style.display=s==='retry'?'':'none'}
   function say(t){line.textContent=t}
+  let ctx=null;
+  try{ctx=JSON.parse(sessionStorage.getItem('pack_pay_ctx')||'null')}catch(e){}
+  const ctxOrder=ctx&&/^[0-9a-f-]{36}$/.test(String(ctx.order_id||''))?String(ctx.order_id):null;
+  const backTo=ctx&&typeof ctx.from==='string'&&/^\\/[a-z0-9][a-z0-9\\/-]{0,79}$/i.test(ctx.from)&&ctx.from.indexOf('//')!==0?ctx.from:'/';
+  function settled(credits,balance){
+    try{sessionStorage.removeItem('pack_pay_ctx')}catch(e){}
+    el.delta.textContent='+'+credits+' credits';
+    el.bal.textContent='balance: 🔥 '+balance+' credits';
+    el.denCta.href=backTo;
+    el.denCta.textContent=backTo==='/'?'To the dens':'Back to your den';
+    show('success');say('settled — thank you for feeding the fire.');
+  }
+  async function poll(orderId,tries){
+    for(let i=0;i<tries;i++){
+      if(i>0)await new Promise(function(res){setTimeout(res,5000)});
+      try{
+        const rr=await fetch('/api/payments/orders/'+orderId+'/reconcile',{method:'POST'});
+        const dd=await rr.json().catch(function(){return {}});
+        if(dd.ok&&dd.status==='settled'){settled(dd.credits,dd.balance);return true}
+        if(dd.ok&&dd.status==='confirming'){say('payment seen on-chain, waiting for confirmation…')}
+      }catch(e){}
+    }
+    return false;
+  }
   try{
     const r=await fetch('/api/credits');const d=await r.json();
-    if(!d.ok){say('Sign in to watch your order settle — your credits are safe either way.');return}
+    if(!d.ok){show('retry');say('Sign in to watch your order settle — if you paid, your credits are safe either way.');return}
     say('balance: 🔥 '+d.balance+' credits — watching for settlement…');
-    const pending=(d.orders||[]).find(function(o){return o.status==='created'});
-    if(!pending){say('balance: 🔥 '+d.balance+' credits — no open orders. The fire is fed.');return}
-    for(let i=0;i<12;i++){
-      await new Promise(function(res){setTimeout(res,5000)});
-      try{
-        const rr=await fetch('/api/payments/orders/'+pending.id+'/reconcile',{method:'POST'});
-        const dd=await rr.json().catch(function(){return {}});
-        if(dd.ok&&dd.status==='settled'){
-          say('✅ settled — '+dd.credits+' credits landed. Balance: 🔥 '+dd.balance+'. The fire roars.');
-          document.getElementById('thanks-lead').textContent='Your credits have landed.';
-          return;
-        }
-        if(dd.ok&&dd.status==='confirming'){say('payment seen on-chain, waiting for confirmation…')}
-      }catch{}
+    const orders=d.orders||[];
+    let orderId=ctxOrder;
+    if(orderId){
+      // The ctx order may already be settled (settlement raced us) — say so.
+      const mine=orders.find(function(o){return o.id===orderId});
+      if(mine&&mine.status==='settled'){settled(mine.credits,d.balance);return}
+    } else {
+      const pending=orders.filter(function(o){return o.status==='created'});
+      if(!pending.length){
+        show('progress');
+        document.querySelector('#thx-progress h1').textContent='The fire is fed 🔥';
+        say('balance: 🔥 '+d.balance+' credits — no open orders.');
+        return;
+      }
+      orderId=pending[pending.length-1].id; // oldest open order first
     }
-    say('still confirming on-chain — this can take a few minutes. Your order settles automatically; check /pay shortly.');
-  }catch{say('Could not check your order just now — if you paid, it settles automatically. See /pay.')}
+    if(await poll(orderId,24))return;
+    show('retry');say('still confirming on-chain — this can take a few minutes.');
+    document.getElementById('thx-retry-btn').addEventListener('click',async function(){
+      show('progress');say('checking again…');
+      if(!(await poll(orderId,6))){show('retry');say('still confirming on-chain — your order settles automatically; check /pay shortly.')}
+    });
+  }catch(e){show('retry');say('Could not check your order just now — if you paid, it settles automatically. See /pay.')}
 })();
 </script>`;
-  return layout({ title: "Thank you", body, identity });
+  return layout({ title: "Credits", body, identity });
 }

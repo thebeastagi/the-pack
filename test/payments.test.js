@@ -162,7 +162,10 @@ test("create-intent: SKU-pinned amount, pack: order_ref namespacing, order persi
   assert.equal(order.sku, "fire");
   assert.equal(order.status, "created");
   assert.equal(order.provider_ref, "chk_test_1");
-  assert.match(order.order_ref, new RegExp(`^pack:${uid}:[0-9a-f-]{36}$`));
+  // payment-ux: order_ref is pack:{uuid} — the hosted AllScale page renders it
+  // to the payer (Details → Order ID), so it must NOT leak the internal user id.
+  assert.match(order.order_ref, /^pack:[0-9a-f-]{36}$/);
+  assert.ok(!order.order_ref.includes(uid), "order_ref must not embed the user UUID");
 });
 
 // ── webhook ──────────────────────────────────────────────────────────────────
@@ -311,18 +314,22 @@ test("/pay renders packs + honest terms; unconfigured → offline note + disable
   assert.match(html, /7,000 cr/);
   assert.match(html, /non-refundable, non-transferable, no cash-out/);
   assert.match(html, /being wired up/); // honest unconfigured state
-  assert.match(html, /data-pack="spark" disabled/);
+  assert.match(html, /<button class="btn fire" disabled>Feed the fire — \$5<\/button>/);
+  assert.doesNotMatch(html, /\/pay\/checkout\?pack=/); // no checkout links while offline
 
   const envLive = makeEnv();
   const { cookie: c2 } = await claimHuman(envLive, "ready-buyer");
   const html2 = await (await worker.fetch(req("/pay", { headers: { cookie: c2 } }), envLive)).text();
-  assert.match(html2, /data-pack="spark" /);
-  assert.doesNotMatch(html2, /data-pack="spark" disabled/);
+  // payment-ux: cards link to the in-Pack pre-checkout confirm screen.
+  assert.match(html2, /href="\/pay\/checkout\?pack=spark"/);
+  assert.match(html2, /href="\/pay\/checkout\?pack=inferno"/);
+  assert.doesNotMatch(html2, /<button class="btn fire" disabled/);
 
-  // /pay/thanks renders the settle watcher
+  // /pay/thanks renders the settle watcher (payment-ux states)
   const thanks = await (await worker.fetch(req("/pay/thanks", { headers: { cookie: c2 } }), envLive)).text();
-  assert.match(thanks, /Thank you/);
+  assert.match(thanks, /Confirming your payment/);
   assert.match(thanks, /reconcile/);
+  assert.match(thanks, /pack_pay_ctx/);
 });
 
 test("served inline scripts parse on /pay + /pay/thanks + authed home (credits pill)", async () => {

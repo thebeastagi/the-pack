@@ -94,7 +94,11 @@ export async function handleCreateIntent(request, env, identity, skus) {
   if (!sku) return apiError(400, "bad_pack", "Unknown credit pack. Choose Spark, Ember, Fire, or Inferno.");
 
   const orderId = uuid();
-  const orderRef = `pack:${identity.user.id}:${orderId}`;
+  // order_ref is PAYER-VISIBLE: the hosted AllScale checkout page renders it
+  // under Details → Order ID (live-verified 2026-07-23). Never embed internal
+  // ids — pack:{uuid} keeps the approved pack: store namespacing without
+  // leaking the user's UUID onto a third-party page.
+  const orderRef = `pack:${orderId}`;
   await db.createPaymentOrder(env.DB, {
     id: orderId,
     userId: identity.user.id,
@@ -109,7 +113,10 @@ export async function handleCreateIntent(request, env, identity, skus) {
     amount_cents: sku.amountCents,
     order_id: orderRef,
     order_description: `The Pack — ${sku.credits} den-fire credits (${sku.label} pack)`.slice(0, 240),
-    redirect_url: "https://pack.thebeastagi.com/pay/thanks",
+    // Return target after payment completes (AllScale redirects on success
+    // only — there is no cancel/expired redirect on the hosted page).
+    // HOSTNAME-derived so preview gets its own thanks page.
+    redirect_url: `https://${env.HOSTNAME || "pack.thebeastagi.com"}/pay/thanks`,
     // Priced natively in USDC (1:1 USD, card on-ramp settles USDC); payer may
     // choose USDT on the hosted page instead.
     stable_coin: ALLSCALE_STABLECOIN_ENUM.USDC,

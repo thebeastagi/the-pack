@@ -20,7 +20,7 @@ routes = [
 ]
 
 [vars]
-PACK_VERSION = "0.9.3-preview-real-turnstile"  # R2 closed (2026-07-23): real Turnstile widget keys (site=var, secret=wrangler secret)
+PACK_VERSION = "0.9.5-preview-payment-ux"  # payment-ux (2026-07-23): in-Pack pre-checkout + return landing (branch payment-ux)
 # ── native auth (M1, PREVIEW-ONLY posture) ─────────────────────────────────
 # AUTH_MODE: "access" (default when absent — prod behavior) | "native".
 # Preview runs native; the Access edge app on pack-preview stays UP, so the

@@ -4,8 +4,9 @@ import { accessGateApplies, accessGateOk, authMode, resolveIdentity, resolveOrRe
 import { getDenBySlug } from "./db.js";
 import { DenRoom } from "./den-room.js";
 import { VoiceDen } from "./voice/voice-den.js";
-import { denPage, homePage, notFoundPage, payPage, payThanksPage } from "./pages.js";
-import { handleAllScaleWebhook } from "./payments.js";
+import { denPage, homePage, notFoundPage, payCheckoutPage, payPage, payThanksPage, sanitizeFromPath } from "./pages.js";
+import { allScaleConfigured, handleAllScaleWebhook } from "./payments.js";
+import { CREDIT_SKUS } from "./credits.js";
 import { apiError, clientIp, escapeHtml, softRateLimit } from "./util.js";
 
 export { DenRoom, VoiceDen };
@@ -208,7 +209,18 @@ export default {
       // Credit storefront + return page (phase 1 monetisation).
       if (path === "/pay" || path === "/pay/") {
         const { identity, setCookie } = await resolveOrRecoverIdentity(request, env);
-        return withSecurityHeaders(html(payPage(identity?.user || null, env), 200, setCookie), env);
+        return withSecurityHeaders(html(payPage(identity?.user || null, env, sanitizeFromPath(url.searchParams.get("from"))), 200, setCookie), env);
+      }
+      // In-Pack pre-checkout confirm (payment-ux): guards identity + payments
+      // configured + valid SKU, else back to the storefront with a clean 302.
+      if (path === "/pay/checkout") {
+        const { identity, setCookie } = await resolveOrRecoverIdentity(request, env);
+        const pack = CREDIT_SKUS[(url.searchParams.get("pack") || "").toLowerCase()] || null;
+        if (!identity || !allScaleConfigured(env) || !pack) {
+          return withSecurityHeaders(Response.redirect(new URL("/pay", url).toString(), 302), env);
+        }
+        const page = payCheckoutPage(identity.user, { ...pack, usd: pack.amountCents / 100 }, sanitizeFromPath(url.searchParams.get("from")));
+        return withSecurityHeaders(html(page, 200, setCookie), env);
       }
       if (path === "/pay/thanks") {
         const { identity, setCookie } = await resolveOrRecoverIdentity(request, env);
