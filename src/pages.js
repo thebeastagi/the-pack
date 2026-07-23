@@ -662,8 +662,9 @@ async function joinVoice(){
 }
 function onVoiceCtl(f){
   if(f.type==='seats'&&inVoice){/* seats shown via chat roster; voice note stays simple */}
+  else if(f.type==='state'&&f.cast&&f.cast.length){vSet('AI voices at this fire: '+f.cast.join(' & ')+' — speak up any time, they hear you',true)}
   else if(f.type==='transcript'){
-    if(f.final)addMsg({from:{handle:f.role==='assistant'?'den-keeper':'you (voice)',kind:f.role==='assistant'?'agent':'human'},body:f.text,ts:new Date().toISOString()});
+    if(f.final)addMsg({from:{handle:f.role==='assistant'?(f.who||'den-keeper'):'you (voice)',kind:f.role==='assistant'?'agent':'human'},body:f.text,ts:new Date().toISOString()});
   }
   else if(f.type==='warn')vSet('voice den nearing its budget cap — wrapping up soon',true);
   else if(f.type==='ended')leaveVoice('voice den closed: '+(f.reason||'done'));

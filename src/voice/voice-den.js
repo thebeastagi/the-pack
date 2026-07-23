@@ -22,6 +22,8 @@ import {
   DAILY_CAP_MINUTES, DEFAULT_XAI_MODEL, DISCLOSURE_TEXT, DOWNLINK_TRACK_NAME, GUARD_TICK_MS, KILLED_TEXT,
   PACER_FRAME_MS, PRICE_PER_MIN_USD, SFU_RATE, SFU_CHANNELS, SFU_WS_CHUNK_BYTES, WRAP_UP_TEXT, XAI_RATE, XAI_CHANNELS,
   XAI_REALTIME_URL,
+  HUMAN_TALK_LEVEL, HUMAN_TALK_ONSET_FRAMES, HUMAN_TALK_RELEASE_FRAMES, LEG_PACER_CAPACITY_MS,
+  REKINDLE_AFTER_MS, REKINDLE_MAX, castForDen,
 } from "./config.js";
 import { CostGuard, DailyCap, GuardStatus, KillReason } from "./costguard.js";
 import { voiceAllowed, voiceSecondsToTicks } from "../caps.js";
@@ -31,7 +33,8 @@ import { Chunker, frameBytes, mixMono, monoToStereo, stereoToMono } from "./pcm.
 import { decodePacket, encodeIngestFrame } from "./packet.js";
 import { SfuClient } from "./sfu-client.js";
 import {
-  buildForceMessage, buildSessionUpdate, classifyError, defaultSessionConfig, extractTranscript, isErrorEvent,
+  buildForceMessage, buildResponseCreate, buildSessionUpdate, characterSessionConfig, classifyError,
+  defaultSessionConfig, extractTranscript, isErrorEvent,
   isSpeechStarted, parseEvent, ErrorKind, TERMINAL_ERROR_KINDS,
 } from "./xai-events.js";
 
@@ -65,7 +68,11 @@ export class VoiceDen {
     this.state = "created";
     this.adapterToken = "";
     this.denSlug = "";
-    this.xai = null;
+    this.xai = null; // legacy alias: single-leg session ws / legs[0].ws (disclosure, warn, killed lines)
+    this.legs = []; // multi-AI cast legs: { name, ws, chunker, pacer, lastAudioAt }
+    this.cast = null;
+    this.humanTalk = { active: false, run: 0, quiet: 0, lastActiveAt: 0 };
+    this.rekindles = 0;
     this.downlink = null;
     this.guard = null;
     this.pacer = new DownlinkPacer();
@@ -79,7 +86,7 @@ export class VoiceDen {
     this.mixerTimer = null;
     this.guardTimer = null;
     this.controls = new Map(); // seatId -> ws
-    this.counts = { upBytes: 0, downBytes: 0, xaiEvents: 0, mixTicks: 0 };
+    this.counts = { upBytes: 0, downBytes: 0, xaiEvents: 0, mixTicks: 0, aiFramesDropped: 0, humanBargeIns: 0 };
     this.sfu = (this.deps.sfuFactory ?? ((id, sec, base) => new SfuClient({ appId: id, appSecret: sec, apiBase: base })))(
       env.REALTIME_SFU_APP_ID,
       env.REALTIME_SFU_SECRET,
@@ -141,7 +148,11 @@ export class VoiceDen {
       this.downChunker = new Chunker(frameBytes(SFU_RATE, SFU_CHANNELS, PACER_FRAME_MS));
       this.ingestAdapterId = this.ingestSessionId = null;
       this.warnSpoken = this.disclosurePlayed = false;
-      this.counts = { upBytes: 0, downBytes: 0, xaiEvents: 0, mixTicks: 0 };
+      this.legs = [];
+      this.cast = null;
+      this.humanTalk = { active: false, run: 0, quiet: 0, lastActiveAt: 0 };
+      this.rekindles = 0;
+      this.counts = { upBytes: 0, downBytes: 0, xaiEvents: 0, mixTicks: 0, aiFramesDropped: 0, humanBargeIns: 0 };
     }
     if (this.state === "created") {
       // Daily cap (authoritative check inside the coordination atom)
@@ -171,7 +182,12 @@ export class VoiceDen {
       }
 
       this.state = "connecting";
-      this.guard = new CostGuard({ startedAt: this.now() });
+      // Multi-AI cast dens: N legs = N metered xAI sessions. The guard prices
+      // wall-clock at N × $0.05/min so $-caps stay honest; usage ledgers below
+      // record leg-seconds for the same reason.
+      this.cast = castForDen(this.denSlug, this.env);
+      const legCount = this.cast ? this.cast.length : 1;
+      this.guard = new CostGuard({ startedAt: this.now(), pricePerMin: PRICE_PER_MIN_USD * legCount });
       this.adapterToken = randomToken(16);
 
       // Wave 2: Voice Agent API tools INSIDE the voice session — the Den
@@ -200,13 +216,32 @@ export class VoiceDen {
       const connect = this.deps.connectXai ?? connectXaiWs;
       const model = this.env.XAI_MODEL || DEFAULT_XAI_MODEL;
       const apiKey = this.env.XAI_API_KEY;
-      try {
-        this.xai = await connect(`${XAI_REALTIME_URL}?model=${encodeURIComponent(model)}`, apiKey);
-      } finally {
-        /* apiKey goes out of scope — never stored */
+      const wsUrl = `${XAI_REALTIME_URL}?model=${encodeURIComponent(model)}`;
+      if (!this.cast) {
+        // Legacy single Den Keeper (unchanged wire behavior).
+        this.xai = await connect(wsUrl, apiKey);
+        this.wireXai(this.xai);
+        this.xai.send(JSON.stringify(buildSessionUpdate(defaultSessionConfig(denName, denTopic, { tools: voiceTools }))));
+      } else {
+        // Cast den: one leg per character. Any leg failing to connect fails
+        // the session (fail-closed — never a half-cast fire billing quietly).
+        for (const character of this.cast) {
+          const ws = await connect(wsUrl, apiKey);
+          const leg = {
+            name: character.name,
+            ws,
+            chunker: new Chunker(MIX_FRAME_BYTES), // xAI mono 20ms frames
+            pacer: new DownlinkPacer({ rate: XAI_RATE, channels: XAI_CHANNELS, capacityMs: LEG_PACER_CAPACITY_MS }),
+            lastAudioAt: 0,
+          };
+          this.legs.push(leg);
+          this.wireXaiLeg(leg);
+          ws.send(JSON.stringify(buildSessionUpdate(
+            characterSessionConfig(character, denName, denTopic, { tools: character.tools ? voiceTools : null }),
+          )));
+        }
+        this.xai = this.legs[0].ws; // spoken lines (disclosure/warn/close) come from the first character
       }
-      this.wireXai(this.xai);
-      this.xai.send(JSON.stringify(buildSessionUpdate(defaultSessionConfig(denName, denTopic, { tools: voiceTools }))));
 
       // 2) Shared downlink ingest adapter (DO -> SFU track "den-voice")
       const host = this.env.HOSTNAME;
@@ -376,11 +411,15 @@ export class VoiceDen {
     };
     unrefable(setTimeout(heal, 8000));
 
-    // Disclosure plays when the FIRST seat can actually hear it.
+    // Disclosure plays when the FIRST seat can actually hear it. Cast dens
+    // use the cast's opening line (still MANDATORY AI disclosure first — AUP)
+    // which doubles as the conversation kickoff: the other legs HEAR it as
+    // audio via the cross-feed and reply on their own VAD (PoC-proven).
     if (!this.disclosurePlayed) {
       this.disclosurePlayed = true;
+      const openingText = this.cast?.[0]?.opening || DISCLOSURE_TEXT;
       try {
-        this.xai?.send(JSON.stringify(buildForceMessage(DISCLOSURE_TEXT, false)));
+        this.xai?.send(JSON.stringify(buildForceMessage(openingText, false)));
       } catch {}
     }
 
@@ -558,6 +597,65 @@ export class VoiceDen {
     if (line) this.broadcastControls({ type: "transcript", ...line });
   }
 
+  // ------------------------------------------------- cast legs (multi-AI)
+  wireXaiLeg(leg) {
+    leg.ws.addEventListener("message", (e) => this.onXaiLegMessage(leg, e));
+    const onGone = () => {
+      // Any leg dying = the fire closes (fail-closed: no half-cast spend).
+      if (this.state === "bridging" || this.state === "waiting_media") void this.teardown(KillReason.XAI_ERROR);
+    };
+    leg.ws.addEventListener("close", onGone);
+    leg.ws.addEventListener("error", onGone);
+  }
+
+  pushLegAudio(leg, mono) {
+    this.counts.downBytes += mono.length;
+    leg.lastAudioAt = this.now();
+    // Per-leg pacer real-times the bursty TTS; the unified mixer tick pops one
+    // 20ms frame per leg and fans it out (den-voice track + other legs' ears).
+    for (const frame of leg.chunker.feed(mono)) leg.pacer.push(frame);
+  }
+
+  async onXaiLegMessage(leg, event) {
+    const data = event?.data;
+    const binAudio = await coerceBytes(data);
+    if (binAudio) {
+      this.pushLegAudio(leg, binAudio);
+      return;
+    }
+    if (typeof data !== "string") return;
+    let evt;
+    try {
+      evt = parseEvent(data);
+    } catch {
+      return;
+    }
+    this.counts.xaiEvents++;
+    if (evt.type === "response.output_audio.delta" || evt.type === "response.audio.delta") {
+      const b64 = typeof evt.delta === "string" ? evt.delta : "";
+      if (b64) this.pushLegAudio(leg, base64ToU8(b64));
+      return;
+    }
+    if (isErrorEvent(evt)) {
+      const kind = classifyError(evt);
+      if (TERMINAL_ERROR_KINDS.has(kind)) {
+        await this.teardown(kind === ErrorKind.BILLING ? KillReason.BILLING_ERROR : KillReason.AUTH_ERROR);
+      }
+      return;
+    }
+    // speech_started on a cast leg fires for OTHER AI legs too (that is the
+    // turn-taking engine) — human floor priority is handled by the DO-side
+    // energy gate in mixerTick, NOT by flushing here.
+    if (isSpeechStarted(evt)) return;
+    const line = extractTranscript(evt);
+    if (!line) return;
+    if (line.role === "assistant") {
+      this.broadcastControls({ type: "transcript", ...line, who: leg.name });
+    }
+    // role=user lines on a cast leg are ASR of the MIXED floor (other AI legs
+    // included) — broadcasting them would duplicate every spoken turn. Dropped.
+  }
+
   // ---------------------------------------------------------- control channel
   handleControlWs(request, url) {
     const seatId = String(url.searchParams.get("seat") || "");
@@ -580,7 +678,7 @@ export class VoiceDen {
       // Browser gone mid-voice => the seat leaves (no orphaned spend).
       void this.dropSeat(seatId, KillReason.HANGUP);
     });
-    this.sendControl(server, { type: "state", state: this.state });
+    this.sendControl(server, { type: "state", state: this.state, ...(this.legs.length ? { cast: this.legs.map((l) => l.name) } : {}) });
     this.sendControl(server, { type: "seats", seats: this.seatList() });
     return this.upgrade(pair[0]);
   }
@@ -628,44 +726,115 @@ export class VoiceDen {
     }, PACER_FRAME_MS));
 
     // Unified mixer tick: take each seat's 20ms frame ONCE, then fan out:
-    // (a) xAI hears EVERYONE (single mixed mono stream);
+    // (a) xAI leg(s) hear the floor (cast legs: everyone but themselves);
     // (b) each seat's floor hears everyone BUT that seat (human↔human audio).
-    this.mixerTimer = unrefable(setInterval(() => {
-      if (this.state !== "bridging") return;
-      this.counts.mixTicks++;
-      const frames = new Map(); // seatId -> Uint8Array | null
-      let anyAudio = false;
-      for (const seat of this.seats.values()) {
-        const take = this.takeFromSeat(seat, MIX_FRAME_BYTES);
-        frames.set(seat.seatId, take);
-        if (take) anyAudio = true;
-      }
-      // (a) xAI leg (unchanged behavior; continuous stream incl. silence)
-      if (this.xai) {
-        const mixed = anyAudio ? mixMono([...frames.values()], MIX_FRAME_BYTES) : new Uint8Array(MIX_FRAME_BYTES);
-        try {
-          this.xai.send(mixed);
-        } catch {}
-      }
-      // (b) floor legs (only when someone else actually spoke — silence otherwise)
-      for (const dest of this.seats.values()) {
-        const parts = [];
-        let heard = false;
-        for (const [srcId, frame] of frames) {
-          if (srcId === dest.seatId) continue;
-          parts.push(frame);
-          if (frame) heard = true;
-        }
-        if (!heard) continue;
-        const mono = mixMono(parts, MIX_FRAME_BYTES);
-        const stereo = monoToStereo(mono);
-        for (const chunk of dest.floorChunker.feed(stereo)) dest.floorPacer.push(chunk);
-      }
-    }, PACER_FRAME_MS));
+    this.mixerTimer = unrefable(setInterval(() => this.mixerTick(), PACER_FRAME_MS));
 
     this.guardTimer = unrefable(setInterval(() => {
       void this.guardTick();
     }, GUARD_TICK_MS));
+  }
+
+  mixerTick() {
+    if (this.state !== "bridging") return;
+    this.counts.mixTicks++;
+    const frames = new Map(); // seatId -> Uint8Array | null
+    let anyAudio = false;
+    for (const seat of this.seats.values()) {
+      const take = this.takeFromSeat(seat, MIX_FRAME_BYTES);
+      frames.set(seat.seatId, take);
+      if (take) anyAudio = true;
+    }
+    const humanParts = [...frames.values()];
+
+    if (this.legs.length === 0) {
+      // (a) legacy single Den Keeper (unchanged behavior; continuous stream incl. silence)
+      if (this.xai) {
+        const mixed = anyAudio ? mixMono(humanParts, MIX_FRAME_BYTES) : new Uint8Array(MIX_FRAME_BYTES);
+        try {
+          this.xai.send(mixed);
+        } catch {}
+      }
+    } else {
+      // (a') cast legs — floor politeness first: while a human holds the floor
+      // (energy gate over the mixed human frame), AI output is flushed and
+      // DROPPED (never delayed-then-replayed). The legs still HEAR the human
+      // below, so xAI server VAD cancels their in-flight replies.
+      const humanMix = anyAudio ? mixMono(humanParts, MIX_FRAME_BYTES) : null;
+      this.updateHumanTalk(humanMix);
+      let legFrames = this.legs.map((l) => l.pacer.pop());
+      if (this.humanTalk.active) {
+        const dropped = legFrames.filter(Boolean).length;
+        if (dropped) {
+          this.counts.aiFramesDropped += dropped;
+          legFrames = legFrames.map(() => null);
+        }
+      }
+      // den-voice SFU track = the AI side of the fire (all legs mixed) — the
+      // browser client keeps pulling the same TWO tracks as today.
+      if (legFrames.some(Boolean)) {
+        this.pacer.push(monoToStereo(mixMono(legFrames, MIX_FRAME_BYTES)));
+      }
+      // Each leg hears: all humans + every OTHER leg (never itself) — the
+      // exact "everyone but yourself" discipline, continuous incl. silence.
+      for (let i = 0; i < this.legs.length; i++) {
+        const others = legFrames.filter((_, j) => j !== i);
+        const heard = anyAudio || others.some(Boolean);
+        const mixed = heard ? mixMono(humanParts.concat(others), MIX_FRAME_BYTES) : new Uint8Array(MIX_FRAME_BYTES);
+        try {
+          this.legs[i].ws.send(mixed);
+        } catch {}
+      }
+    }
+
+    // (b) floor legs (only when someone else actually spoke — silence otherwise)
+    for (const dest of this.seats.values()) {
+      const parts = [];
+      let heard = false;
+      for (const [srcId, frame] of frames) {
+        if (srcId === dest.seatId) continue;
+        parts.push(frame);
+        if (frame) heard = true;
+      }
+      if (!heard) continue;
+      const mono = mixMono(parts, MIX_FRAME_BYTES);
+      const stereo = monoToStereo(mono);
+      for (const chunk of dest.floorChunker.feed(stereo)) dest.floorPacer.push(chunk);
+    }
+  }
+
+  /** Human floor gate: avg |int16| of the mixed human frame (every 4th sample),
+   * onset after HUMAN_TALK_ONSET_FRAMES hot frames, release after
+   * HUMAN_TALK_RELEASE_FRAMES quiet ones. Onset flushes all AI output. */
+  updateHumanTalk(mixFrame) {
+    let level = 0;
+    if (mixFrame) {
+      const dv = new DataView(mixFrame.buffer, mixFrame.byteOffset, mixFrame.byteLength);
+      const n = Math.floor(dv.byteLength / 2);
+      let sum = 0, cnt = 0;
+      for (let i = 0; i < n; i += 4) {
+        sum += Math.abs(dv.getInt16(i * 2, true));
+        cnt++;
+      }
+      level = cnt ? sum / cnt : 0;
+    }
+    const ht = this.humanTalk;
+    if (level > HUMAN_TALK_LEVEL) {
+      ht.run++;
+      ht.quiet = 0;
+    } else {
+      ht.quiet++;
+      ht.run = 0;
+    }
+    if (!ht.active && ht.run >= HUMAN_TALK_ONSET_FRAMES) {
+      ht.active = true;
+      this.counts.humanBargeIns++;
+      this.pacer.flush(); // stop the den-voice queue mid-word: humans have the floor
+      for (const leg of this.legs) leg.pacer.flush();
+    } else if (ht.active && ht.quiet >= HUMAN_TALK_RELEASE_FRAMES) {
+      ht.active = false;
+    }
+    if (ht.active) ht.lastActiveAt = this.now();
   }
 
   /** Take up to `n` bytes from a seat queue; null when the seat is silent. */
@@ -715,6 +884,21 @@ export class VoiceDen {
       await this.teardown(this.guard.killReason);
       return;
     }
+    // Cast dens: if the fire has gone quiet (no AI audio AND no human floor
+    // for REKINDLE_AFTER_MS), nudge one leg with a response.create — bounded
+    // at REKINDLE_MAX per session so a stuck model can never loop spend.
+    if (this.legs.length > 1 && this.state === "bridging" && this.disclosurePlayed && this.rekindles < REKINDLE_MAX) {
+      const now = this.now();
+      const lastLeg = Math.max(...this.legs.map((l) => l.lastAudioAt || 0));
+      if (lastLeg > 0 && now - lastLeg > REKINDLE_AFTER_MS && now - (this.humanTalk.lastActiveAt || 0) > REKINDLE_AFTER_MS) {
+        this.rekindles++;
+        const leg = this.legs[this.rekindles % this.legs.length];
+        try {
+          leg.ws.send(JSON.stringify(buildResponseCreate()));
+        } catch {}
+        this.broadcastControls({ type: "rekindle", n: this.rekindles, who: leg.name });
+      }
+    }
     this.broadcastControls({ type: "status", ...this.statusRecord() });
   }
 
@@ -744,6 +928,9 @@ export class VoiceDen {
       } catch {}
     }
     try { this.xai?.close(1000, "voice den closed"); } catch {}
+    for (const leg of this.legs) {
+      try { leg.ws?.close(1000, "voice den closed"); } catch {}
+    }
     try { this.downlink?.close(1000, "voice den closed"); } catch {}
     for (const seat of this.seats.values()) {
       try { seat.uplinkWs?.close(1000, "voice den closed"); } catch {}
@@ -751,26 +938,29 @@ export class VoiceDen {
     }
     this.xai = this.downlink = null;
 
-    // Daily-cap accounting (counts-only, D1)
+    // Daily-cap accounting (counts-only, D1). Cast dens record LEG-seconds
+    // (wall-clock × number of xAI sessions) so every cap stays a true $ cap.
     let closedElapsedS = 0;
+    const legCount = Math.max(1, this.legs.length || (this.cast ? this.cast.length : 1));
     if (this.guard) {
       const cap = new DailyCap(DAILY_CAP_MINUTES * 60);
       closedElapsedS = Math.round(this.guard.elapsedS(this.now()));
+      const legSeconds = closedElapsedS * legCount;
       try {
-        await db.addVoiceUsage(this.env.DB, cap.key, closedElapsedS);
+        await db.addVoiceUsage(this.env.DB, cap.key, legSeconds);
       } catch {}
       // Wave 2: per-den minute ledger + voice spend inside the pack's daily
       // USD ceiling (kind 'voice'; wall-clock estimate is the documented
       // UPPER BOUND — exact audio minutes are not exposed per session).
       try {
-        await db.addVoiceUsageDen(this.env.DB, cap.key, this.denSlug || "unknown", closedElapsedS);
+        await db.addVoiceUsageDen(this.env.DB, cap.key, this.denSlug || "unknown", legSeconds);
         await db.addBrainUsage(
           this.env.DB,
           cap.key,
           this.denSlug || "unknown",
           "voice",
           0,
-          voiceSecondsToTicks(closedElapsedS, PRICE_PER_MIN_USD),
+          voiceSecondsToTicks(legSeconds, PRICE_PER_MIN_USD),
         );
       } catch {}
     }
@@ -782,8 +972,9 @@ export class VoiceDen {
         this.ctx,
         "voice_session",
         this.denSlug || "unknown",
-        `${closedElapsedS}s campfire voice, reason=${reason}, seats_at_close=${this.seats.size}, ` +
-          `up=${this.counts.upBytes}B down=${this.counts.downBytes}B`,
+        `${closedElapsedS}s campfire voice (${legCount} AI leg${legCount > 1 ? "s" : ""}), reason=${reason}, ` +
+          `seats_at_close=${this.seats.size}, up=${this.counts.upBytes}B down=${this.counts.downBytes}B` +
+          (legCount > 1 ? `, barge_ins=${this.counts.humanBargeIns}, rekindles=${this.rekindles}` : ""),
       );
     } catch {}
 
@@ -808,6 +999,13 @@ export class VoiceDen {
       killReason: this.guard?.killReason ?? KillReason.NONE,
       bufferedMs: this.pacer.bufferedMs,
       counts: { ...this.counts, floorBytes, pacer: { ...this.pacer.stats } },
+      ...(this.legs.length
+        ? {
+            cast: this.legs.map((l) => ({ name: l.name, bufferedMs: l.pacer.bufferedMs })),
+            humanTalking: this.humanTalk.active,
+            rekindles: this.rekindles,
+          }
+        : {}),
     };
   }
 }

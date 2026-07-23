@@ -24,6 +24,21 @@ export function defaultSessionConfig(denName, denTopic, opts = {}) {
   };
 }
 
+/** Session config for a CAST character (multi-AI voice dens, voice-den branch).
+ * Same wire shape as defaultSessionConfig plus per-character voice / output
+ * speed / VAD silence (slow talkers double-fire ASR at 700ms — measured
+ * 2026-07-23 character tuning). */
+export function characterSessionConfig(character, denName, denTopic, opts = {}) {
+  const base = defaultSessionConfig(denName, denTopic, opts);
+  return {
+    ...base,
+    voice: character.voice,
+    instructions: character.persona,
+    vadSilenceMs: character.vadSilenceMs ?? base.vadSilenceMs,
+    outputSpeed: character.speed && character.speed !== 1 ? character.speed : null,
+  };
+}
+
 export function buildSessionUpdate(cfg) {
   const session = {
     voice: cfg.voice,
@@ -38,7 +53,12 @@ export function buildSessionUpdate(cfg) {
       : null,
     audio: {
       input: { format: { type: "audio/pcm", rate: cfg.inputRate, channels: XAI_CHANNELS } },
-      output: { format: { type: "audio/pcm", rate: cfg.outputRate, channels: XAI_CHANNELS } },
+      output: {
+        format: { type: "audio/pcm", rate: cfg.outputRate, channels: XAI_CHANNELS },
+        // Realtime pacing knob, CONFIRMED honored 2026-07-23 (0.7–1.5).
+        // Absent key = server default 1.0 (legacy wire shape preserved).
+        ...(cfg.outputSpeed ? { speed: cfg.outputSpeed } : {}),
+      },
       transport: "binary",
     },
   };
