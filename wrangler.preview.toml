@@ -20,7 +20,7 @@ routes = [
 ]
 
 [vars]
-PACK_VERSION = "0.9.2-preview-cf-email"  # M1+ (2026-07-23): native OTP auth + Cloudflare Email Service sender
+PACK_VERSION = "0.9.3-preview-real-turnstile"  # R2 closed (2026-07-23): real Turnstile widget keys (site=var, secret=wrangler secret)
 # ── native auth (M1, PREVIEW-ONLY posture) ─────────────────────────────────
 # AUTH_MODE: "access" (default when absent — prod behavior) | "native".
 # Preview runs native; the Access edge app on pack-preview stays UP, so the
@@ -39,14 +39,12 @@ EMAIL_PROVIDER = "cloudflare"
 EMAIL_FROM = "no-reply@thebeastagi.com"   # CANDIDATE from address — final = Robin's domain choice
 EMAIL_FROM_NAME = "The Pack"
 EMAIL_STUB_FALLBACK = "1"                 # PREVIEW-ONLY escape hatch (see above)
-# Cloudflare's DOCUMENTED always-pass TEST keys (developers.cloudflare.com/
-# turnstile/troubleshooting/testing/). These are public constants, NOT secrets
-# — which is the only reason a *_SECRET_KEY may live in this file. The real
-# widget secret (Robin decision R2) MUST be `wrangler secret put
-# TURNSTILE_SECRET_KEY`, never a var. Health + login page banner scream
-# "test-keys" while these are in place.
-TURNSTILE_SITE_KEY = "1x00000000000000000000AA"
-TURNSTILE_SECRET_KEY = "1x0000000000000000000000000000000AA"
+# REAL Turnstile widget (Robin R2 CLOSED 2026-07-23): site key is a public
+# constant (embedded in login HTML for every visitor) so it may live here.
+# The widget SECRET is `wrangler secret put TURNSTILE_SECRET_KEY` — never a
+# var, never committed. Widget hostnames: pack.thebeastagi.com +
+# pack-preview.thebeastagi.com. Pre-clearance: OFF (siteverify-only usage).
+TURNSTILE_SITE_KEY = "0x4AAAAAAD8AScKP949aLmFi"
 # Access gate stays ON post-launch (2026-07-21 public flip): the main app policy
 # is now "everyone" — any email via one-time code. Verified email = signup + abuse
 # guard. Full lift (no gate at all) = "0" + redeploy + remove/disable the main app.
