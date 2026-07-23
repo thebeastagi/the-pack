@@ -18,7 +18,7 @@ routes = [
 ]
 
 [vars]
-PACK_VERSION = "0.9.4"           # 0.9.4 (2026-07-23): PROD native auth cutover — AUTH_MODE=native + CF Email Sending OTP + real Turnstile (migration 0010)
+PACK_VERSION = "0.10.0"         # 0.10.0 (2026-07-23): payment-UX (pre-checkout, /pay/thanks rewrite, order_ref privacy) + wolf avatars + roster panel
 # ── native auth (M3 PROD cutover, 2026-07-23) ──────────────────────────────
 # AUTH_MODE: "access" (legacy CF Access edge harvest) | "native" (worker-owned
 # email OTP; cf-access-* headers UNCONDITIONALLY ignored). Rollback = set back
