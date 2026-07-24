@@ -18,7 +18,7 @@ routes = [
 ]
 
 [vars]
-PACK_VERSION = "0.10.0"         # 0.10.0 (2026-07-23): payment-UX (pre-checkout, /pay/thanks rewrite, order_ref privacy) + wolf avatars + roster panel
+PACK_VERSION = "0.10.4"         # 0.10.4 (2026-07-24): overnight-QA honest-UX (cast-aware dens, guest read-only den view, load-* hidden, honest recency, checkout disclosure) + multi-AI voice den (Ash+Birch) + voice tuning (Ash orion@0.8 / Birch sirius@0.8)
 # ── native auth (M3 PROD cutover, 2026-07-23) ──────────────────────────────
 # AUTH_MODE: "access" (legacy CF Access edge harvest) | "native" (worker-owned
 # email OTP; cf-access-* headers UNCONDITIONALLY ignored). Rollback = set back
@@ -63,7 +63,7 @@ PACK_RAG_GLOBAL_CAP = "200"           # file_search calls / UTC day across all d
 PACK_DEN_DOCS_CAP = "20"              # max docs per den knowledge base (≤20KB text each)
 PACK_VOICE_TOOLS = "1"                # "0" = no tools key on voice sessions at all
 PACK_VOICE_SEARCH_DEFAULT = "1"       # "0" = no web/X tools in voice (den file_search unaffected)
-PACK_VOICE_DEN_MIN_CAP = "10"         # voice minutes / den / UTC day (global day cap stays 30)
+PACK_VOICE_DEN_MIN_CAP = "30"         # voice LEG-minutes / den / UTC day (2-leg cast den = 15 wall-min; global day cap stays 30). Robin can dial to 10 with one word.
 # v0.7.0 (2026-07-21, phase-1 monetisation) — den-fire credits. The PACK_*
 # caps above (search/image/RAG counts + daily USD) are HARD infrastructure
 # ceilings (absolute for everyone, paying or not). The PACK_FREE_* vars below
