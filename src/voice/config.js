@@ -98,7 +98,7 @@ export const VOICE_CASTS = {
     {
       name: "Birch",
       voice: "sirius",
-      speed: 1.15,
+      speed: 1.0, // was 1.15 — Jane (HQ t1951 msg-3761, Jul 24): "Birch needs to talk a little slower. Maybe keep it at 1 speed?"
       vadSilenceMs: 1000,
       tools: false,
       persona:
