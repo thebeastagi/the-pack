@@ -26,7 +26,7 @@ test("castForDen: built-in fireside cast, default dens stay legacy (null)", () =
   assert.equal(cast[0].speed, 0.8);
   assert.equal(cast[0].vadSilenceMs, 1100);
   assert.equal(cast[1].voice, "sirius");
-  assert.equal(cast[1].speed, 1.0); // 1.15→1.0 per Jane esc-3761 (Jul 24): Birch a little slower
+  assert.equal(cast[1].speed, 0.8); // 1.15→1.0→0.8 per Jane esc-3771 (Jul 24): still a bit fast, try 0.8
   assert.match(cast[0].opening, /A I (wolves|voices)/);
   assert.equal(cast[0].tools, false);
 });
@@ -61,7 +61,7 @@ test("characterSessionConfig: voice/speed/VAD flow into the session.update wire 
   assert.match(upd.session.instructions, /Ash/);
   assert.ok(!("tools" in upd.session), "cast legs carry no paid tools by default");
   const upd2 = buildSessionUpdate(characterSessionConfig(birch, "Fireside", ""));
-  assert.ok(!("speed" in upd2.session.audio.output), "Birch@1.0 sends no speed key (xAI default = 1.0)");
+  assert.equal(upd2.session.audio.output.speed, 0.8); // Birch@0.8 sends speed key again (≠1.0)
   // legacy shape unchanged: no speed key when speed is 1.0/absent
   const legacy = buildSessionUpdate(characterSessionConfig({ ...ash, speed: 1 }, "d", ""));
   assert.ok(!("speed" in legacy.session.audio.output));
@@ -164,7 +164,7 @@ test("cast den: TWO legs connect, each with its own character session.update; op
   assert.equal(ua[0].session.voice, "orion");
   assert.equal(ua[0].session.audio.output.speed, 0.8);
   assert.equal(ub[0].session.voice, "sirius");
-  assert.ok(!("speed" in ub[0].session.audio.output), "Birch@1.0 sends no speed key (xAI default = 1.0)");
+  assert.equal(ub[0].session.audio.output.speed, 0.8); // Birch@0.8 per Jane esc-3771
   // opening/disclosure: exactly once, ONLY leg0, non-interruptible, discloses AI
   const fa = a.jsonSent("conversation.item.create"), fb = b.jsonSent("conversation.item.create");
   assert.equal(fa.length, 1);

@@ -20,7 +20,7 @@ routes = [
 ]
 
 [vars]
-PACK_VERSION = "0.10.3-preview-overnight-qa"  # Birch voice speed 1.15->1.0 per Jane esc-3761 (2026-07-24)
+PACK_VERSION = "0.10.4-preview-overnight-qa"  # Birch voice speed 1.0->0.8 per Jane esc-3771 (2026-07-24)
 # ── native auth (M1, PREVIEW-ONLY posture) ─────────────────────────────────
 # AUTH_MODE: "access" (default when absent — prod behavior) | "native".
 # Preview runs native; the Access edge app on pack-preview stays UP, so the
